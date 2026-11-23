@@ -115,6 +115,7 @@ func (h *notificationHandlers) bot(c *gin.Context) {
 func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot) {
 	var req struct {
 		ProjectID          string  `json:"projectId"`
+		Channel            *string `json:"channel"`
 		Name               string  `json:"name"`
 		BotID              string  `json:"botId"`
 		Secret             string  `json:"secret"`
@@ -133,7 +134,22 @@ func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot)
 		c.JSON(400, gin.H{"error": "请填写有效的名称、Bot ID 和 Secret"})
 		return
 	}
-	bot := domain.NotificationBot{ID: "bot-" + randomID(), ProjectID: strings.TrimSpace(req.ProjectID), Name: req.Name, BotID: req.BotID, Enabled: req.Enabled, Health: "unchecked"}
+	channel := "wecom"
+	if old != nil {
+		channel = domain.NotificationChannel(old.Channel)
+	}
+	if req.Channel != nil {
+		channel = domain.NotificationChannel(*req.Channel)
+	}
+	if channel != "wecom" && channel != "feishu" {
+		c.JSON(400, gin.H{"error": "不支持的通知渠道"})
+		return
+	}
+	if old != nil && channel != domain.NotificationChannel(old.Channel) {
+		c.JSON(400, gin.H{"error": "已有机器人的渠道不可更改，请新建机器人"})
+		return
+	}
+	bot := domain.NotificationBot{ID: "bot-" + randomID(), Channel: channel, ProjectID: strings.TrimSpace(req.ProjectID), Name: req.Name, BotID: req.BotID, Enabled: req.Enabled, Health: "unchecked"}
 	if old != nil {
 		bot = *old
 		bot.Name = req.Name
@@ -151,6 +167,10 @@ func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot)
 	}
 	if req.InteractionEnabled != nil {
 		bot.InteractionEnabled = *req.InteractionEnabled
+	}
+	if channel == "feishu" && bot.InteractionEnabled {
+		c.JSON(400, gin.H{"error": "飞书当前支持群通知，暂不支持接收消息和自动执行"})
+		return
 	}
 	if req.Model != nil {
 		model, err := normalizeFeatureModel(*req.Model)

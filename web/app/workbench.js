@@ -62,8 +62,8 @@ const CREDENTIAL_KINDS=[
     guide:[['打开 GitHub「Settings → Developer settings → Personal access tokens」','https://github.com/settings/tokens','前往 GitHub 申请个人访问令牌'],['新建令牌，为目标仓库授予 <code>Contents</code> 和 <code>Pull requests</code> 的读写权限'],['复制令牌粘贴到下方，保存前会自动校验权限']],
     placeholder:'请输入个人访问令牌（PAT）',hint:'保存前会先校验令牌有效性与权限',
     impact:'依赖私有仓库的 SOP 将无法克隆或推送仓库。'},
-  {key:'gitSshKey',group:'platform',name:'Git SSH',short:'Git SSH 密钥',icon:'key',
-    use:'SSH 密钥用于克隆和推送；创建 PR/MR 需要访问令牌',dialog:()=>openGitSSHKeys(),action:'管理密钥'},
+  {key:'gitSshKey',group:'platform',name:'Gitea / Git SSH',short:'SSH 仓库接入',icon:'key',
+    use:'Gitea、GitLab 等 SSH 仓库；按主机和端口匹配个人密钥',dialog:()=>openGitSSHKeys(),action:'管理密钥'},
   {key:'gitHttpCredentials',group:'platform',name:'Git HTTPS',short:'Git 访问令牌',icon:'lock',
     use:'按主机管理 HTTPS 访问令牌，工作区的 git、gh、glab 自动认证',dialog:()=>openGitHTTPCredentials(),action:'管理令牌'},
   {key:'codeBuddyApiKey',group:'model',name:'CodeBuddy',short:'CodeBuddy API Key',logo:'codebuddy',
@@ -730,10 +730,10 @@ function credentialRowHTML(kind,user){
 }
 const GIT_ADD_OPTIONS=[
   {id:'gitToken',name:'GitHub',logo:'github',monochrome:true},
+  {id:'gitSshKey',name:'Gitea / Git SSH',icon:'key'},
   {id:'gitlab',name:'GitLab',logo:'gitlab',monochrome:true},
   {id:'github',name:'GitHub Enterprise',logo:'github',monochrome:true},
   {id:'other',name:'其他 Git',icon:'globe'},
-  {id:'gitSshKey',name:'Git SSH',icon:'key'},
 ];
 function credentialOptionHTML({id,name,logo,monochrome,icon},selected){
   const file=logo&&(logo.endsWith('.png')?logo:logo+'.svg');

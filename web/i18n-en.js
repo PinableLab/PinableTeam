@@ -149,6 +149,10 @@ Object.assign(window.LF_I18N_EN,{
 Object.assign(window.LF_I18N_EN,{"平台目录":"Platform catalog","通用模板按名称绑定这些 MCP，添加到本项目后即可使用。":"Generic templates bind these MCPs by name. Add one to this project to use it.","已添加到当前项目":"Added to this project","添加中…":"Adding…"});
 Object.assign(window.LF_I18N_EN,{
   "Git SSH 密钥":"Git SSH keys",
+  "SSH 仓库接入":"SSH repository access",
+  "Gitea、GitLab 等 SSH 仓库；按主机和端口匹配个人密钥":"Gitea, GitLab and other SSH repositories; personal keys matched by host and port",
+  "支持 Gitea、GitLab 等代码托管服务。每个 SSH 主机和端口配置一把个人密钥，匹配的仓库自动共用。":"Supports Gitea, GitLab and other Git hosts. Configure a personal key per SSH host and port; matching repositories share it.",
+  "先将公钥添加到 Gitea 等服务的账号设置，保存对应私钥后，在项目中添加仓库的 SSH 克隆地址。此入口仅支持 Git 克隆和推送，不提供 OAuth 登录、Issue 同步或自动创建 PR。":"Add the public key to your Git hosting account, save the matching private key here, then add the repository's SSH clone address to your project. This entry supports Git clone and push only, not OAuth sign-in, issue sync or automatic PR creation.",
   "按 SSH 主机管理个人密钥，仓库自动匹配":"Manage personal keys by SSH host; repositories match automatically",
   "管理密钥":"Manage keys",
   "每个 SSH 主机配置一把个人密钥，同一主机的仓库自动共用。":"Configure one personal key per SSH host. Repositories on the same host share it automatically.",
@@ -261,6 +265,17 @@ Object.assign(window.LF_I18N_EN,{
   "该 CLI 支持 API Key。使用服务商订阅套餐提供的 Key，执行用量会计入对应的套餐额度。请在「个人配置」中填写 API Key。":"This CLI supports API keys. With a key included in your provider's subscription, usage counts toward that plan's allowance. Enter the API key in Personal Settings."
 });
 Object.assign(window.LF_I18N_EN,{"查看其他项目共享的技能；共享技能只读，会自动装入平台上所有对话和定时任务，也可绑定到本项目角色。": "Skills shared by other projects. Shared Skills are read-only, are installed automatically into every conversation and scheduled task on the platform, and can be bound to Roles in this project.", "共享后，这个技能会自动装入平台上所有用户的对话和定时任务（包括其他项目和无项目的对话），模型可以直接调用。继续？": "Once shared, this Skill is installed automatically into every user's conversations and scheduled tasks on the platform (including other projects and conversations without a project), and the model can call it directly. Continue?", "共享这个角色会同时共享它绑定的技能：": "Sharing this Role also shares the Skills bound to it: ", "已共享，所有对话和定时任务会自动装入": "Shared. Every conversation and scheduled task will install it automatically", "其他项目可在「共享角色」里选用；绑定的本项目技能会一起共享，并自动装入所有对话": "Other projects can pick it under Shared roles; the project Skills bound to it are shared too and installed into every conversation automatically", "共享技能": "Share Skill"});
+
+Object.assign(window.LF_I18N_EN, {
+  '通知渠道': 'Notification channel',
+  '飞书': 'Feishu',
+  '飞书（群通知）': 'Feishu (group notifications)',
+  '让任务进展抵达企业微信或飞书': 'Deliver task updates to WeCom or Feishu',
+  '飞书自建应用 App ID': 'Feishu self-built app ID',
+  '飞书当前支持群通知，不接收消息或执行对话。请启用自建应用机器人、授权读取群列表和发送消息，发布应用并将机器人加入接收群。App Secret 仅保存在服务端。': 'Feishu currently supports group notifications only, not inbound messages or conversations. Enable the app bot, grant chat-list and message-send permissions, publish the app, and add the bot to the destination group. App Secret is stored only on the server.',
+  '只展示飞书机器人已加入且当前可读取的群。请先将机器人加入接收群并授予群列表权限，再刷新。': 'Only groups the Feishu bot has joined and can currently read are listed. Add the bot to the destination group and grant chat-list access, then refresh.'
+});
+
 Object.assign(window.LF_I18N_EN, {
   "执行超时（分钟）": "Execution timeout (minutes)",
   "默认 30 分钟。达到时限会停止本次 AI 执行，已启动的 SOP 继续运行。": "Defaults to 30 minutes. The deadline stops the AI task. Any SOPs it started continue running.",

@@ -9,6 +9,7 @@ type BotChat struct {
 	LastMessageTime string `json:"lastMessageTime,omitempty"`
 }
 type NotificationBot struct {
+	Channel            string     `json:"channel,omitempty"`
 	ID                 string     `json:"id"`
 	ProjectID          string     `json:"projectId"`
 	OwnerID            int64      `json:"ownerId"`

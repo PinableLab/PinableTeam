@@ -23,6 +23,7 @@ import (
 	"agentflow/internal/config"
 	"agentflow/internal/domain"
 	"agentflow/internal/engine"
+	"agentflow/internal/feishuregistration"
 	"agentflow/internal/knowledge"
 	"agentflow/internal/mcpserver"
 	"agentflow/internal/notification"
@@ -91,9 +92,11 @@ type Server struct {
 	tokens          *tokenHandlers    // auth_tokens.go
 	syncAPI         *syncHandlers     // tracker.go
 	notifications   *notificationHandlers
+	feishuQR        *feishuRegistrationHandlers
 	botInteractions *botInteractionHandlers
 	botIdentities   *botIdentityHandlers
 	know            *knowledgeHandlers // knowledge.go / knowledge_proxy.go
+	feedback        *feedbackHandlers  // page_feedback.go
 }
 
 func New(s *repo.Store, e *engine.Engine, syncSvc *tracker.Service, basicUser, basicPass string) *gin.Engine {
@@ -175,6 +178,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 		tokens:          &tokenHandlers{deps: d},
 		syncAPI:         &syncHandlers{deps: d},
 		know:            &knowledgeHandlers{deps: d, svc: knowledge.NewService(d.repo, randomID), activity: &knowledgeActivityLog{}},
+		feedback:        &feedbackHandlers{deps: d},
 	}
 	e.WorkspaceActive = func(run domain.Run) bool { return api.runs.terminals.HasRunScope(run.ID) }
 	api.catalog.notifications = api.notifications
@@ -226,6 +230,11 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	}
 	g.Use(d.runWriteGuard(), d.assetWriteGuard())
 
+	api.feishuQR = &feishuRegistrationHandlers{deps: d, store: feishuregistration.NewStore()}
+	g.POST("/api/notification-bot-registrations/feishu", api.feishuQR.handle)
+	g.POST("/api/notification-bot-registrations/feishu/:id/poll", api.feishuQR.handle)
+	g.DELETE("/api/notification-bot-registrations/feishu/:id", api.feishuQR.handle)
+	g.POST("/api/notification-bot-registrations/feishu/:id/consume", api.feishuQR.handle)
 	g.GET("/api/notification-bots", api.notifications.bots)
 	g.POST("/api/notification-bots", api.notifications.bots)
 	g.PUT("/api/notification-bots/:id", api.notifications.bot)
@@ -502,6 +511,12 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.GET("/api/analytics", api.runs.analytics)
 	g.GET("/api/observability/spec", api.observabilitySpec)
 	g.POST("/api/otel/*path", api.otel)
+
+	// --- page feedback (standalone, no project) ---
+	g.POST("/api/page-feedback", api.feedback.submit)
+	g.GET("/api/page-feedback", api.feedback.list)
+	g.GET("/api/page-feedback/:id", api.feedback.detail)
+	g.GET("/api/page-feedback/:id/images/:imageId", api.feedback.image)
 
 	// --- knowledge base ---
 	g.GET("/api/knowledge/settings", api.know.settings)

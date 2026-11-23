@@ -20,11 +20,12 @@ function canManageBot(bot){
 function botStepAllowed(bot,step){return step===1||(step===2&&!!bot?.id)||(step===3&&!!bot?.id&&!!bot?.target&&!bot._targetChanged)}
 function botStepDone(bot,step){return step===1?!!bot?.id:step===2?botStepAllowed(bot,3):false}
 function botStoredBot(bot){return bot?.id?botUI.items.find(b=>b.id===bot.id):null}
+function botChannel(bot){return bot?.channel||'wecom'}
 function botCredentialsDirty(bot){
  const stored=botStoredBot(bot);
  if(!stored)return !!bot;
  const modelID=value=>(value||'').replace(/^codebuddy:/,'');
- return !!bot._secret||(bot.name||'')!==(stored.name||'')||(bot.botId||'')!==(stored.botId||'')||modelID(bot.model)!==modelID(stored.model)||!!bot.enabled!==!!stored.enabled||!!bot.interactionEnabled!==!!stored.interactionEnabled;
+ return botChannel(bot)!==botChannel(stored)||!!bot._secret||(bot.name||'')!==(stored.name||'')||(bot.botId||'')!==(stored.botId||'')||modelID(bot.model)!==modelID(stored.model)||!!bot.enabled!==!!stored.enabled||!!bot.interactionEnabled!==!!stored.interactionEnabled;
 }
 
 function botIcon(name){return `<span class="bot-icon" data-bot-icon="${name}" aria-hidden="true"></span>`}
@@ -62,7 +63,7 @@ function botTargetHTML(target){return target?`<span class="bot-target"><span cla
 function botRowHTML(bot){
  const id=escapeHTML(bot.id),name=escapeHTML(bot.name),manage=canManageBot(bot),target=botTargetHTML(bot.target);
  const model=globalThis.AgentFlowAssistantModels?.concreteModelId(bot.model)??bot.model;
- const sub=[escapeHTML(model||''),bot.interactionEnabled?'已启用对话':''].filter(Boolean).join(' · ');
+ const sub=[botChannel(bot)==='feishu'?'飞书':'企业微信',escapeHTML(model||''),bot.interactionEnabled?'已启用对话':''].filter(Boolean).join(' · ');
  return `<tr data-bot-row="${id}"><td><div class="bot-row-main"><span class="bot-glyph">${botIcon('robot')}</span><span class="bot-row-text"><b class="bot-row-name">${name}</b><small class="bot-row-sub">${sub}</small><small class="bot-row-target">${target}</small></span></div></td><td class="bot-col-target">${target}</td><td>${botEnabledBadge(bot.enabled)}</td><td class="bot-col-sub">${botHealthBadge(bot.health)}</td><td class="bot-col-actions"><div class="bot-row-actions"><button type="button" class="hui-icon-btn" data-bot-edit="${id}" aria-label="编辑 ${name}" title="编辑">${botIcon('edit')}</button>${manage?`<button type="button" class="hui-icon-btn is-danger" data-bot-delete="${id}" aria-label="删除 ${name}" title="删除">${botIcon('trash')}</button>`:''}</div></td></tr>`;
 }
 function botListHTML(items){
@@ -72,7 +73,7 @@ function botListHTML(items){
 function botGuideHTML(){
  const project=typeof currentProject==='function'?currentProject():null;
  const steps=[['① 填写凭据','名称、Bot ID 与 Secret'],['② 选择接收会话','绑定单聊或群聊'],['③ 发送测试','确认消息能送达']];
- return `<div class="bot-guide"><div class="bot-guide-icon">${botIcon('robot')}</div><h2>让任务进展抵达企业微信</h2><p class="muted">还没有机器人。三步完成配置，随后在 SOP 设置或 AI 定时任务中选择这个 Bot。</p><ol>${steps.map(([title,text],i)=>`<li style="--i:${i}"><b>${title}</b><span>${text}</span></li>`).join('')}</ol>${project?.name?`<p class="muted">当前项目：${escapeHTML(project.name)}</p>`:''}<button type="button" class="button primary" data-bot-new ${canCreateBot()?'':'disabled'}>${botIcon('plus')}开始添加</button></div>`;
+ return `<div class="bot-guide"><div class="bot-guide-icon">${botIcon('robot')}</div><h2>让任务进展抵达企业微信或飞书</h2><p class="muted">还没有机器人。三步完成配置，随后在 SOP 设置或 AI 定时任务中选择这个 Bot。</p><ol>${steps.map(([title,text],i)=>`<li style="--i:${i}"><b>${title}</b><span>${text}</span></li>`).join('')}</ol>${project?.name?`<p class="muted">当前项目：${escapeHTML(project.name)}</p>`:''}<button type="button" class="button primary" data-bot-new ${canCreateBot()?'':'disabled'}>${botIcon('plus')}开始添加</button></div>`;
 }
 function botStepsHTML(bot,step){
  return `<div class="bot-steps" style="--bot-progress:${(step-1)/2}"><div class="bot-step-track" aria-hidden="true"><i></i></div>${BOT_STEPS.map(([n,label])=>{const done=n!==step&&botStepDone(bot,n);return `<button type="button" class="bot-step${n===step?' active':''}${done?' done':''}" data-bot-step="${n}" ${botStepAllowed(bot,n)&&!botUI.busy?'':'disabled'} ${n===step?'aria-current="step"':''}><span class="bot-step-n">${done?botIcon('check-draw'):n}</span><span class="bot-step-label">${label}</span></button>`}).join('')}</div>`;
@@ -84,11 +85,12 @@ function botEditTabHTML(bot){
  return `<div class="bot-editor">${botStepsHTML(bot,step)}<div class="bot-step-fold"><div class="bot-step-pane" data-bot-pane="${step}">${pane}</div></div>${!manage?'<p class="muted bot-hint">仅创建者或项目管理员可修改凭据和接收目标。</p>':''}</div>`;
 }
 function botCredentialPaneHTML(bot,manage){
- return `<form id="botForm" novalidate><fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-fields"><label>名称<input class="input" name="name" required maxlength="80" value="${escapeHTML(bot.name)}" placeholder="例如：研发进展通知"></label><label>Bot ID<input class="input" name="botId" required maxlength="191" value="${escapeHTML(bot.botId)}" autocomplete="off" placeholder="企业微信智能机器人 Bot ID"></label><label>Secret<input class="input" name="secret" type="password" value="${escapeHTML(bot._secret||'')}" maxlength="512" ${bot.id?'':'required'} autocomplete="new-password" placeholder="${bot.secretConfigured?'已配置 · 留空保留，填写则替换':'填写机器人 Secret'}"></label><div class="bot-model-field"><span>执行器与模型</span>${botModelPickerHTML()}</div><label class="bot-check"><input name="enabled" type="checkbox" role="switch" ${bot.enabled?'checked':''}>启用此 Bot</label><label class="bot-check"><input name="interactionEnabled" type="checkbox" role="switch" ${bot.interactionEnabled?'checked':''}>启用对话（自动执行）</label></div><p class="muted bot-hint">首次对话请按 Bot 提示关联平台账号；新单聊和群聊会自动建立上下文。发送 /new 或“开启新会话”开始新的对话。</p><div class="bot-save-row"><button type="submit" class="button primary">${botBusyLabel('save','','保存并下一步','保存中…')}</button></div></fieldset></form>`;
+ if(!bot.id&&botChannel(bot)==='feishu'&&!feishuQR.manual)return feishuQRPaneHTML(bot);
+ return `${!bot.id&&botChannel(bot)==='feishu'?'<button type="button" class="button ghost small" data-feishu-qr="qr">返回扫码添加</button>':''}<form id="botForm" novalidate><fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-fields"><label>名称<input class="input" name="name" required maxlength="80" value="${escapeHTML(bot.name)}" placeholder="例如：研发进展通知"></label><label>通知渠道<select class="input" name="channel" ${bot.id?'disabled':''}><option value="wecom" ${botChannel(bot)==='wecom'?'selected':''}>企业微信</option><option value="feishu" ${botChannel(bot)==='feishu'?'selected':''}>飞书（群通知）</option></select></label><label>${botChannel(bot)==='feishu'?'App ID':'Bot ID'}<input class="input" name="botId" required maxlength="191" value="${escapeHTML(bot.botId)}" autocomplete="off" placeholder="${botChannel(bot)==='feishu'?'飞书自建应用 App ID':'企业微信智能机器人 Bot ID'}"></label><label>${botChannel(bot)==='feishu'?'App Secret':'Secret'}<input class="input" name="secret" type="password" value="${escapeHTML(bot._secret||'')}" maxlength="512" ${bot.id?'':'required'} autocomplete="new-password" placeholder="${bot.secretConfigured?'已配置 · 留空保留，填写则替换':'填写机器人 Secret'}"></label><div class="bot-model-field"><span>执行器与模型</span>${botModelPickerHTML()}</div><label class="bot-check"><input name="enabled" type="checkbox" role="switch" ${bot.enabled?'checked':''}>启用此 Bot</label><label class="bot-check"><input name="interactionEnabled" type="checkbox" role="switch" ${botChannel(bot)==='feishu'?'disabled':''} ${bot.interactionEnabled?'checked':''}>启用对话（自动执行）</label></div><p class="muted bot-hint">${botChannel(bot)==='feishu'?'飞书当前支持群通知，不接收消息或执行对话。请启用自建应用机器人、授权读取群列表和发送消息，发布应用并将机器人加入接收群。App Secret 仅保存在服务端。':'首次对话请按 Bot 提示关联平台账号；新单聊和群聊会自动建立上下文。发送 /new 或“开启新会话”开始新的对话。'}</p><div class="bot-save-row"><button type="submit" class="button primary">${botBusyLabel('save','','保存并下一步','保存中…')}</button></div></fieldset></form>`;
 }
 function botTargetPaneHTML(bot,manage){
  const changed=!!bot._targetChanged;
- return `<fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-bar"><b>接收会话</b><button type="button" class="button ghost small" id="botRefreshSessions" ${bot.id?'':'disabled'}>${botBusyLabel('sessions','refresh','刷新可发送列表','刷新中…')}</button></div><p class="muted bot-hint">只展示机器人当前可通知的最近会话。找不到目标时，请先在企业微信与 Bot 互动，再刷新。</p><div class="bot-current">${bot.target?`当前目标：<span class="bot-chip">${botTypeLabel(bot.target.type)}</span> ${escapeHTML(bot.target.name)}<button type="button" class="button ghost small" id="botClearTarget">清除目标</button>`:'尚未绑定接收会话'}</div><input class="input" id="botSessionSearch" type="search" placeholder="搜索已获取的联系人或群名" value="${escapeHTML(botUI.query)}"><div id="botSessionList" class="bot-sessions">${botSessionHTML()}</div><div class="bot-save-row"><button type="button" class="button primary" id="botSaveTarget" ${changed||bot.target?'':'disabled'}>${changed?botBusyLabel('target','','保存接收会话','保存中…'):'下一步'}</button></div></fieldset>`;
+ return `<fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-bar"><b>接收会话</b><button type="button" class="button ghost small" id="botRefreshSessions" ${bot.id?'':'disabled'}>${botBusyLabel('sessions','refresh','刷新可发送列表','刷新中…')}</button></div><p class="muted bot-hint">${botChannel(bot)==='feishu'?'只展示飞书机器人已加入且当前可读取的群。请先将机器人加入接收群并授予群列表权限，再刷新。':'只展示机器人当前可通知的最近会话。找不到目标时，请先在企业微信与 Bot 互动，再刷新。'}</p><div class="bot-current">${bot.target?`当前目标：<span class="bot-chip">${botTypeLabel(bot.target.type)}</span> ${escapeHTML(bot.target.name)}<button type="button" class="button ghost small" id="botClearTarget">清除目标</button>`:'尚未绑定接收会话'}</div><input class="input" id="botSessionSearch" type="search" placeholder="搜索已获取的联系人或群名" value="${escapeHTML(botUI.query)}"><div id="botSessionList" class="bot-sessions">${botSessionHTML()}</div><div class="bot-save-row"><button type="button" class="button primary" id="botSaveTarget" ${changed||bot.target?'':'disabled'}>${changed?botBusyLabel('target','','保存接收会话','保存中…'):'下一步'}</button></div></fieldset>`;
 }
 function botTestPaneHTML(bot,manage){
  const ready=!!(bot.enabled&&bot.target);
@@ -201,6 +203,7 @@ function botCollapseRow(row){
 }
 
 function botResetProject(){
+ feishuQRReset();
  clearTimeout(botUI.watchTimer);
  Object.assign(botUI,{items:[],deliveries:[],selected:null,sessions:[],query:'',tab:'list',step:1,recordsTab:'deliveries',interactionBotId:'',interaction:null,interactionLoading:false,interactionError:'',testResult:'',flashId:'',motion:null,shownCount:null,watchTimer:0,watchCount:0});
 }
@@ -262,6 +265,7 @@ function renderBotHeading(){
 }
 function botSwitchTab(tab){
  if(!BOT_TABS.includes(tab)||tab===botUI.tab||botUI.busy)return;
+ if(tab!=='edit')feishuQRReset();
  const from=BOT_TABS.indexOf(botUI.tab),to=BOT_TABS.indexOf(tab);
  botUI.tab=tab;botUI.error='';botMotion('tab',to>from?1:-1);
  if(tab==='list'){botMotion('rows');if(botUI.flashId){botMotion('flash',botUI.flashId);botUI.flashId=''}}
@@ -270,7 +274,8 @@ function botSwitchTab(tab){
 }
 function botOpenEditor(bot){
  if(botUI.busy||(!bot&&!canCreateBot()))return;
- botUI.selected=bot?structuredClone(bot):{name:'',botId:'',enabled:true,projectId:state.projectFilter};
+ feishuQRReset();
+ botUI.selected=bot?structuredClone(bot):{name:'',channel:'wecom',botId:'',enabled:true,projectId:state.projectFilter};
  Object.assign(botUI,{step:1,sessions:[],query:'',testResult:'',error:''});
  if(botUI.tab==='edit'){botMotion('tab',0);renderBots()}else botSwitchTab('edit');
 }
@@ -302,16 +307,17 @@ function bindBots(host){
  host.querySelector('#botInteractionBot')?.addEventListener('change',event=>{botUI.interactionBotId=event.target.value;botUI.interaction=null;botMotion('entries');loadBotInteractions();renderBots()});
  host.querySelector('#botRefreshInteractions')?.addEventListener('click',()=>{loadBotInteractions();renderBots()});
 }
-function captureBotDraft(host){const form=host.querySelector('#botForm');if(!form||!botUI.selected)return;botUI.selected.name=form.elements.name.value;botUI.selected.botId=form.elements.botId.value;botUI.selected.enabled=form.elements.enabled.checked;botUI.selected.model=form.elements.model?.value||botUI.selected.model||'';botUI.selected.interactionEnabled=form.elements.interactionEnabled.checked;botUI.selected._secret=form.elements.secret.value}
+function captureBotDraft(host){const form=host.querySelector('#botForm');if(!form||!botUI.selected)return;botUI.selected.channel=form.elements.channel.value;botUI.selected.name=form.elements.name.value;botUI.selected.botId=form.elements.botId.value;botUI.selected.enabled=form.elements.enabled.checked;botUI.selected.model=form.elements.model?.value||botUI.selected.model||'';botUI.selected.interactionEnabled=botChannel(botUI.selected)==='wecom'&&form.elements.interactionEnabled.checked;botUI.selected._secret=form.elements.secret.value}
 function botSaveSelected(saved){const index=botUI.items.findIndex(b=>b.id===saved.id);if(index<0)botUI.items.push(saved);else botUI.items[index]=saved;botUI.selected=structuredClone(saved);botUI.error='';nodeBotCache.delete(botUI.projectId)}
 function bindBotEditor(host){
+ feishuQRBind(host);
  host.querySelector('#botDelete')?.addEventListener('click',()=>botDelete(botStoredBot(botUI.selected)||botUI.selected,null));
  const form=host.querySelector('#botForm');
  if(form){
   const ready=window.AgentFlowAssistantModels?.bindFeaturePicker(form.querySelector('#botModelPicker'),{
     model:botUI.selected?.model,keepSaved:true,readOnly:form.querySelector('fieldset').disabled
   });
-  form.oninput=event=>{event.target.removeAttribute?.('aria-invalid');captureBotDraft(host)};form.onchange=()=>captureBotDraft(host);
+  form.oninput=event=>{event.target.removeAttribute?.('aria-invalid');captureBotDraft(host)};form.onchange=event=>{captureBotDraft(host);if(event.target.name==='channel'){feishuQRReset();if(botChannel(botUI.selected)==='feishu')botUI.selected.enabled=false;botUI.selected.botId='';botUI.selected._secret='';botUI.selected.target=null;botUI.selected.interactionEnabled=false;renderBots()}};
   form.onsubmit=async event=>{
    event.preventDefault();
    await ready;
@@ -324,7 +330,7 @@ function bindBotEditor(host){
     form.querySelector('#botModelPicker [data-feature-model]')?.focus();
     toast('请先选择模型','warn');return;
    }
-   const payload={projectId,name:bot.name,botId:bot.botId,enabled:bot.enabled,model:bot.model,interactionEnabled:bot.interactionEnabled,secret:form.elements.secret.value};
+   const payload={projectId,channel:botChannel(bot),name:bot.name,botId:bot.botId,enabled:bot.enabled,model:bot.model,interactionEnabled:bot.interactionEnabled,secret:form.elements.secret.value};
    if(bot.id&&!payload.secret&&bot.botId===botStoredBot(bot)?.botId&&bot._targetChanged)payload.targetId=bot.target?.id||'';
    if(bot._targetChanged&&(payload.secret||!bot.id)){toast('请先保存凭据，再刷新并选择目标','warn');return}
    botUI.busy=true;botUI.busyAction='save';renderBots();
@@ -356,7 +362,7 @@ function bindBotEditor(host){
   botUI.busy=true;botUI.busyAction='target';renderBots();
   let saved=null;
   try{
-   saved=await api(`/api/notification-bots/${encodeURIComponent(bot.id)}`,{method:'PUT',body:JSON.stringify({projectId,name:stored.name,botId:stored.botId,enabled:stored.enabled,model:stored.model,interactionEnabled:stored.interactionEnabled,secret:'',targetId:bot.target?.id||''})});
+   saved=await api(`/api/notification-bots/${encodeURIComponent(bot.id)}`,{method:'PUT',body:JSON.stringify({projectId,channel:botChannel(stored),name:stored.name,botId:stored.botId,enabled:stored.enabled,model:stored.model,interactionEnabled:stored.interactionEnabled,secret:'',targetId:bot.target?.id||''})});
    if(revision!==botUI.revision||projectId!==state.projectFilter){saved=null;return}
    botSaveSelected(saved);toast(saved.target?'接收会话已保存':'已清除接收会话','ok');
   }catch(e){if(revision===botUI.revision)botUI.error=e.message}
@@ -439,3 +445,98 @@ async function loadBotInteractions(){
  catch(e){if(current())botUI.interactionError=e.message}
  finally{if(current()){botUI.interactionLoading=false;renderBots()}}
 }
+
+// 飞书扫码登记只在当前编辑器内持有；凭据始终留在服务端，扫码完成不等于保存或启用。
+const feishuQR={ticket:null,projectId:'',draft:null,busy:false,error:'',timer:0,epoch:0,manual:false};
+const FEISHU_REGISTRATION_API='/api/notification-bot-registrations/feishu';
+function feishuQRPNG(value){
+ const text=String(value||'');
+ return text.length<=1048576&&/^data:image\/png;base64,iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(text)?text:'';
+}
+function feishuQRCurrent(epoch){
+ const view=$('#botsView');
+ return epoch===feishuQR.epoch&&feishuQR.projectId===state.projectFilter&&feishuQR.draft===botUI.selected&&botUI.tab==='edit'&&botUI.step===1&&!feishuQR.manual&&botChannel(botUI.selected)==='feishu'&&!botUI.selected?.id&&(!view||view.classList.contains('active'));
+}
+function feishuQRExpired(ticket){return !Number.isFinite(Date.parse(ticket?.expiresAt))||Date.parse(ticket.expiresAt)<=Date.now()}
+function feishuQRDelete(ticket,projectId){
+ return ticket?.id?api(FEISHU_REGISTRATION_API+'/'+encodeURIComponent(ticket.id)+'?projectId='+encodeURIComponent(projectId),{method:'DELETE',silent:true}):Promise.resolve();
+}
+function feishuQRReset(){
+ clearTimeout(feishuQR.timer);
+ const ticket=feishuQR.ticket,projectId=feishuQR.projectId;
+ feishuQR.epoch++;Object.assign(feishuQR,{ticket:null,busy:false,error:'',timer:0,draft:null,manual:false});
+ if(ticket)void feishuQRDelete(ticket,projectId).catch(()=>{});
+}
+function feishuQRPaneHTML(bot){
+ const ticket=feishuQR.ticket,expired=ticket&&feishuQRExpired(ticket),ready=ticket?.status==='ready'&&!expired;
+ const png=!expired?feishuQRPNG(ticket?.qrImageDataUri):'';
+ const message=expired?'二维码已过期，请重新生成。':ticket?.status==='ready'?'扫码已完成，请点击保存机器人。':ticket?.status==='denied'?'授权已拒绝，可取消后重新生成。':ticket?'使用飞书扫码并完成官方页面操作。':'扫码添加飞书机器人，无需手动填写 App ID 和 App Secret。';
+ return `<div class="bot-fields"><label>名称<input id="feishuQRName" class="input" maxlength="48" value="${escapeHTML(bot.name||'')}" ${ticket||feishuQR.busy?'disabled':''} placeholder="例如：研发进展通知"></label><label>通知渠道<select id="feishuQRChannel" class="input" ${feishuQR.busy?'disabled':''}><option value="wecom">企业微信</option><option value="feishu" selected>飞书（群通知）</option></select></label></div><div role="status" class="bot-hint"><p>${message}</p>${png&&ticket?.status==='pending'?`<img src="${png}" alt="飞书机器人登记二维码" width="240" height="240" style="max-width:100%;height:auto">`:''}${ticket?.appId?`<p>App ID：${escapeHTML(ticket.appId)}</p>`:''}</div>${feishuQR.error?`<p class="bot-error" role="alert">${escapeHTML(feishuQR.error)}</p>`:''}<div class="bot-save-row" style="display:flex;flex-wrap:wrap;gap:8px">${!ticket?`<button type="button" class="button primary" data-feishu-qr="start" ${feishuQR.busy?'disabled':''}>生成二维码</button>`:`<button type="button" class="button primary" data-feishu-qr="save" ${!ready||feishuQR.busy?'disabled':''}>保存机器人</button><button type="button" class="button" data-feishu-qr="poll" ${expired||ticket.status!=='pending'||feishuQR.busy?'disabled':''}>刷新扫码状态</button><button type="button" class="button" data-feishu-qr="cancel" ${feishuQR.busy?'disabled':''}>${expired?'重新生成':'取消扫码'}</button>`}</div><p class="muted bot-hint">保存后保持停用，且不开启对话。下一步：保存草稿机器人 → 刷新群列表、选目标并保存 → 手动启用后再测试。请先发布应用、授予群列表和发消息权限，并将机器人加入接收群。</p><button type="button" class="button ghost small" data-feishu-qr="manual" ${feishuQR.busy?'disabled':''}>高级：手动填写 App ID / App Secret</button>`;
+}
+function feishuQRSchedule(){
+ clearTimeout(feishuQR.timer);const ticket=feishuQR.ticket;if(!ticket)return;
+ const epoch=feishuQR.epoch;
+ const delay=Math.min(Math.max(Number(ticket.intervalSec)||5,2),30)*1000;
+ feishuQR.timer=setTimeout(()=>{
+  if(!feishuQRCurrent(epoch)){feishuQRReset();return}
+  if(feishuQRExpired(ticket)){renderBots();return}
+  if(ticket.status==='pending')void feishuQRAction('poll');
+ },ticket.status==='pending'?Math.min(delay,Math.max(0,Date.parse(ticket.expiresAt)-Date.now())):Math.max(0,Date.parse(ticket.expiresAt)-Date.now()));
+}
+function feishuQRBind(host){
+ host.querySelector('#feishuQRName')?.addEventListener('input',event=>{botUI.selected.name=event.target.value});
+ host.querySelector('#feishuQRChannel')?.addEventListener('change',event=>{const channel=event.target.value;feishuQRReset();botUI.selected.channel=channel;renderBots()});
+ host.querySelectorAll('[data-feishu-qr]').forEach(el=>el.onclick=()=>void feishuQRAction(el.dataset.feishuQr));
+}
+async function feishuQRAction(action){
+ if(feishuQR.busy||!botUI.selected||botUI.selected.id||!canCreateBot())return;
+ if(action==='qr'){feishuQRReset();botUI.selected._secret='';botUI.selected.botId='';botUI.selected.enabled=false;renderBots();return}
+ if(action==='manual'){
+  const ticket=feishuQR.ticket;
+  if(ticket){await feishuQRAction('cancel');if(feishuQR.ticket)return}
+  feishuQR.manual=true;botUI.selected.enabled=false;botUI.selected.interactionEnabled=false;renderBots();return;
+ }
+ if(action==='start'){
+  const name=String(botUI.selected.name||'').trim();if(!name||Array.from(name).length>48){feishuQR.error='请填写 1–48 字的机器人名称。';renderBots();return}
+  feishuQR.projectId=state.projectFilter;feishuQR.draft=botUI.selected;
+ }
+ const epoch=feishuQR.epoch,projectId=feishuQR.projectId,ticket=feishuQR.ticket;
+ if(!feishuQRCurrent(epoch))return;
+ if(action==='save'&&(!ticket||ticket.status!=='ready'||feishuQRExpired(ticket)))return;
+ clearTimeout(feishuQR.timer);feishuQR.busy=true;feishuQR.error='';renderBots();
+ try{
+  if(action==='cancel'){
+   await feishuQRDelete(ticket,projectId);
+   if(feishuQRCurrent(epoch)){feishuQR.ticket=null}
+  }else if(action==='save'){
+   const saved=await api(FEISHU_REGISTRATION_API+'/'+encodeURIComponent(ticket.id)+'/consume',{method:'POST',body:JSON.stringify({projectId})});
+   if(!feishuQRCurrent(epoch))return;
+   if(typeof saved?.id!=='string'||!saved.id.trim())throw Error('机器人保存结果无效，请刷新列表确认。');
+   feishuQR.ticket=null;
+   const items=await api('/api/notification-bots?projectId='+encodeURIComponent(projectId));
+   if(!feishuQRCurrent(epoch))return;
+   const bot=items.find(item=>item.id===saved.id);
+   if(!bot||bot.channel!=='feishu'||bot.projectId!==projectId||bot.enabled||bot.interactionEnabled)throw Error('请刷新机器人列表核对保存结果。');
+   botUI.items=items;botSaveSelected(bot);botUI.step=2;toast('机器人已保存且保持停用，请刷新并选择接收群。','ok');
+  }else{
+   const result=action==='start'
+    ?await api(FEISHU_REGISTRATION_API,{method:'POST',body:JSON.stringify({projectId,name:botUI.selected.name.trim()})})
+    :await api(FEISHU_REGISTRATION_API+'/'+encodeURIComponent(ticket.id)+'/poll',{method:'POST',body:JSON.stringify({projectId})});
+   if(!feishuQRCurrent(epoch)){if(action==='start')void feishuQRDelete(result,projectId).catch(()=>{});return}
+   if(!result?.id||(ticket&&result.id!==ticket.id)||!['pending','ready','denied'].includes(result.status)||!Number.isFinite(Date.parse(result.expiresAt)))throw Error('扫码状态无效，请取消后重试。');
+   feishuQR.ticket={id:result.id,status:result.status,expiresAt:result.expiresAt,intervalSec:result.intervalSec,appId:result.appId,botName:result.botName,qrImageDataUri:result.qrImageDataUri||ticket?.qrImageDataUri};
+   if(result.status==='pending'&&!feishuQRPNG(feishuQR.ticket.qrImageDataUri))throw Error('二维码暂不可用，请取消后重试或使用高级手动配置。');
+  }
+ }catch(error){
+  if(feishuQRCurrent(epoch)){
+   feishuQR.error=error.message||'扫码操作失败，请重试。';
+   if(error.status===410||error.status===404)feishuQR.ticket=null;
+  }
+ }finally{
+  if(epoch===feishuQR.epoch){
+   feishuQR.busy=false;renderBots();
+   if(!feishuQR.error)feishuQRSchedule();
+  }
+ }
+}
+window.addEventListener('pagehide',()=>{clearTimeout(feishuQR.timer);feishuQR.epoch++});
