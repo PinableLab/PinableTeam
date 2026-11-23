@@ -23,6 +23,8 @@ defaults:
 
 jobs:
   release:
+    # The original npm package and other release targets belong to upstream.
+    if: github.repository == 'Tencent/LoopForge'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1

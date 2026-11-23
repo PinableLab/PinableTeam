@@ -98,6 +98,10 @@ func (s *Service) reconcile(ctx context.Context) {
 	}
 	wanted := map[string]domain.NotificationBot{}
 	for _, b := range bots {
+		// Do not send another channel's credentials to the WeCom socket.
+		if domain.NotificationChannel(b.Channel) != "wecom" {
+			continue
+		}
 		wanted[b.ID] = b
 	}
 	s.mu.Lock()

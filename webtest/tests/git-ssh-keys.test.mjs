@@ -152,3 +152,46 @@ test('repository forms only warn for the current user missing the selected SSH h
   assert.equal(legacyHint.hidden, false, 'another user cannot borrow the first user’s host metadata');
   assert.match(legacyHint.textContent, /尚未配置 gitlab.example.org:22/);
 });
+
+
+test('Gitea is directly after GitHub in the add menu and opens host-scoped SSH setup', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const endpoint = '/api/users/1/git-ssh-keys';
+  app.router.get(endpoint, []);
+  app.router.put(endpoint, ({body}) => [{id:'gitea', name:body.name, host:body.host}]);
+  app.evaluate(`
+    state.currentUser={...state.data.users[0],id:1,isGuest:false,gitSshKeyConfigured:false};
+    state.data.users=[state.currentUser];
+    renderPersonalSettings();
+  `);
+  const menu = app.document.querySelector('[data-credential-add-menu="platform"]');
+  const options = [...menu.options].map(option => option.value);
+  assert.equal(options[options.indexOf('gitToken') + 1], 'gitSshKey');
+  assert.match(menu.querySelector('[value="gitSshKey"]').textContent, /Gitea \/ Git SSH/);
+  const before = app.router.calls.length;
+  const enhanced = app.window.HuiSelect.enhance(menu);
+  enhanced.trigger.click();
+  const choice = [...enhanced.panel.querySelectorAll('[role="option"]')].find(option => option.textContent.includes('Gitea / Git SSH'));
+  assert.ok(choice, 'Gitea has a visible add-menu option');
+  // JSDOM's select proxy rejects direct assignment through the custom widget.
+  // Exercise the settings handler with the equivalent native select change.
+  const setSelectedIndex = Object.getOwnPropertyDescriptor(app.window.HTMLSelectElement.prototype, 'selectedIndex').set;
+  setSelectedIndex.call(menu, options.indexOf('gitSshKey'));
+  menu.dispatchEvent(new app.window.Event('change', {bubbles:true}));
+  await settle(6);
+  const dialog = app.document.querySelector('#gitSSHKeyDialog');
+  assert.match(dialog.textContent, /不提供 OAuth 登录、Issue 同步或自动创建 PR/);
+  const form = dialog.querySelector('form');
+  form.elements.name.value = 'Gitea team';
+  form.elements.host.value = 'gitea.example.org:2222';
+  form.elements.privateKey.value = 'test-only-private-key';
+  form.dispatchEvent(new app.window.Event('submit', {bubbles:true, cancelable:true}));
+  await settle(6);
+  const calls = app.router.calls.slice(before);
+  const saved = calls.find(call => call.method === 'PUT' && call.path === endpoint);
+  assert.deepEqual(saved.body, {name:'Gitea team', host:'gitea.example.org:2222', privateKey:'test-only-private-key'});
+  assert.equal(calls.some(call => /github|git-token/.test(call.path)), false);
+  assert.equal(form.elements.privateKey.value, '');
+  assert.match(dialog.textContent, /gitea.example.org:2222/);
+});

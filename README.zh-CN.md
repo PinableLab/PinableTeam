@@ -30,6 +30,8 @@
   <a href="#文档">文档</a>
 </p>
 
+**PinableTeam** 是 [Tencent/LoopForge](https://github.com/Tencent/LoopForge) 的公开 fork，保留上游许可与署名，并提供[飞书群通知](docs/feishu-notifications.md)、按主机配置的 Gitea SSH 接入和[页面反馈 API](docs/api/openapi.yaml)。
+
 https://github.com/user-attachments/assets/10b8ae2e-d7e7-4b78-8876-c45818d4a08f
 
 <p align="center"><sub>80 秒产品演示（1080p，有声）。</sub></p>

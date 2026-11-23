@@ -30,6 +30,8 @@
   <a href="#documentation">Docs</a>
 </p>
 
+**PinableTeam** is a public fork of [Tencent/LoopForge](https://github.com/Tencent/LoopForge). This fork adds outbound [Feishu notifications](docs/feishu-notifications.md), host-scoped Gitea SSH setup, and the [page feedback API](docs/api/openapi.yaml). The upstream licenses and attribution remain in place.
+
 https://github.com/user-attachments/assets/8af401d9-1aae-427c-b4bc-455c12d17beb
 
 <p align="center"><sub>80-second product tour (1080p, with sound).</sub></p>

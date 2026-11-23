@@ -1,8 +1,10 @@
 name: platform
 on:
-  pull_request:
-  push:
-    branches: [main, master]
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
 permissions:
   contents: read
 jobs:
@@ -13,6 +15,8 @@ jobs:
       REAL_BROWSER_TESTS: '^(TestMainBotBrowserStartsAndDrivesRunBrowser|TestBrowserStreamPushesFramesAndRunsCommands|TestRunnerStartsPanelBrowserInRunSandbox|TestBrowserAgentOperationsDriveRealChromium|TestBrowserScrollEndsOnASharpFrame)$'
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -75,6 +79,8 @@ jobs:
       LOOPFORGE_UNCONFIGURED_PASSWORD_FILE: ${{ github.workspace }}/.local/no-key-password
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -180,6 +186,8 @@ jobs:
       LOOPFORGE_UNCONFIGURED_PASSWORD_FILE: ${{ github.workspace }}/.local/no-key-password
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'

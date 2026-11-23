@@ -17,6 +17,7 @@ import (
 type Service struct {
 	Store          *repo.Store
 	Provider       Provider
+	FeishuProvider Provider
 	GenerateReport ReportGenerator
 	Interactions   *botinteraction.Service
 	PublicURL      string
@@ -24,7 +25,7 @@ type Service struct {
 
 func New(s *repo.Store) *Service {
 	base := strings.TrimRight(os.Getenv("AGENTFLOW_PUBLIC_URL"), "/")
-	return &Service{Store: s, Provider: NewCLIProvider(), PublicURL: base, Interactions: botinteraction.New(s)}
+	return &Service{Store: s, Provider: NewCLIProvider(), FeishuProvider: NewFeishuProvider(), PublicURL: base, Interactions: botinteraction.New(s)}
 }
 func (s *Service) secret(bot domain.NotificationBot) (string, error) {
 	secret, err := s.Store.BotCredential(bot.ID)
@@ -38,7 +39,11 @@ func (s *Service) Sessions(ctx context.Context, bot domain.NotificationBot) ([]d
 	if err != nil {
 		return nil, err
 	}
-	chats, err := s.Provider.Sessions(ctx, bot.BotID, secret)
+	provider, err := s.providerFor(bot)
+	if err != nil {
+		return nil, err
+	}
+	chats, err := provider.Sessions(ctx, bot.BotID, secret)
 	health := "ready"
 	if err != nil {
 		health = "error"
@@ -75,6 +80,9 @@ func (s *Service) send(ctx context.Context, bot domain.NotificationBot, targetID
 		}
 	}
 	if !found {
+		if domain.NotificationChannel(bot.Channel) == "feishu" {
+			return errors.New("接收群当前不可用，请将飞书机器人加入群并刷新列表")
+		}
 		return &ProviderError{Code: 404, Message: "接收会话当前不可用，请与机器人互动后刷新列表"}
 	}
 	secret, err := s.secret(bot)
@@ -86,14 +94,18 @@ func (s *Service) send(ctx context.Context, bot domain.NotificationBot, targetID
 			return err
 		}
 	}
-	if len(delivery) > 0 && bot.InteractionEnabled && s.Interactions != nil && delivery[0].NodeID != "" && delivery[0].TargetType != "" && (delivery[0].EventType == "waiting" || delivery[0].EventType == "failed") {
+	if domain.NotificationChannel(bot.Channel) == "wecom" && len(delivery) > 0 && bot.InteractionEnabled && s.Interactions != nil && delivery[0].NodeID != "" && delivery[0].TargetType != "" && (delivery[0].EventType == "waiting" || delivery[0].EventType == "failed") {
 		detailURL := ""
 		if base, err := url.Parse(s.PublicURL); err == nil && (base.Scheme == "https" || base.Scheme == "http") && base.Host != "" {
 			detailURL = s.PublicURL + "/#/runs/" + url.PathEscape(delivery[0].RunID)
 		}
 		return s.Interactions.QueueNotificationCard(ctx, bot, delivery[0], content, detailURL)
 	}
-	return s.Provider.Send(ctx, bot.BotID, secret, targetID, content)
+	provider, err := s.providerFor(bot)
+	if err != nil {
+		return err
+	}
+	return provider.Send(ctx, bot.BotID, secret, targetID, content)
 }
 func (s *Service) Start(ctx context.Context) {
 	if s.Interactions != nil {

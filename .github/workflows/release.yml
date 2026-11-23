@@ -21,7 +21,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-release:
+    # In a fork, never run the inherited publishing chain.
+    if: github.repository == 'Tencent/LoopForge'
+    uses: ./.github/workflows/platform.yml
+    with:
+      source_ref: ${{ inputs.source_ref || github.ref }}
+    permissions:
+      contents: read
   release:
+    needs: validate-release
+    if: github.repository == 'Tencent/LoopForge'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -48,12 +58,6 @@ jobs:
           fi
           if ! git merge-base --is-ancestor "${tag_commit}" origin/main; then
             echo "Release tag ${TAG} is not on main" >&2
-            exit 1
-          fi
-          ci="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow platform.yml --commit "${tag_commit}" \
-            --json event,conclusion --jq '[.[] | select(.event == "push")][0].conclusion // ""')"
-          if [[ "${ci}" != "success" ]]; then
-            echo "The platform workflow has not succeeded on ${tag_commit} (status: ${ci:-not run})" >&2
             exit 1
           fi
           version="${TAG#v}"
