@@ -133,3 +133,69 @@ test('runner cards expose runtime controls and persist limits, defaults, and aut
   await app.evaluate(`window.__removeRunner`);
   assert.ok(app.router.calls.some(c => c.method === 'DELETE' && c.path === '/api/runners/runner-local'));
 });
+
+test('Desktop probe controls require an administrator and an online capable runtime', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const desktop = {provider:'pinable-desktop',status:'online',capabilities:['desktop.probe/v1']};
+  const cli = {provider:'codex',status:'online'};
+  const device = (id, runtimes, status='online') => ({id,ownerUserId:1,runtimes,status});
+  const runners = [
+    device('desktop',[desktop]), device('mixed',[desktop,cli]), device('older',[{...desktop,capabilities:[]}]),
+    device('off',[desktop],'offline'), device('disabled',[{...desktop,status:'disabled'}]),
+    device('cli',[{...cli,capabilities:['desktop.probe/v1']}]),
+  ];
+  app.evaluate(`state.authRequired=true;state.currentUser={id:1,isPlatformAdmin:false};state.runners=${JSON.stringify(runners)};renderRunnersView()`);
+  const list = app.document.querySelector('#runnersList');
+  assert.equal(list.querySelector('.runner-desktop-probe button'), null);
+  await app.evaluate("runDesktopProbe('desktop')");
+  assert.equal(app.router.calls.filter(c => c.path === '/api/runners/tasks').length, 0);
+  app.evaluate("state.currentUser={id:1,isPlatformAdmin:true};renderRunnersView()");
+  assert.deepEqual([...list.querySelectorAll('.runner-desktop-probe')].map(el => el.id), ['desktopProbe-desktop','desktopProbe-mixed']);
+  for (const attr of ['data-runner-check-update','data-runner-run-limit','data-set-default']) {
+    assert.equal(list.querySelector(`[${attr}="desktop"]`), null);
+    assert.ok(list.querySelector(`[${attr}="mixed"]`));
+  }
+  app.evaluate("state.currentUser={isPlatformAdmin:true,isGuest:true};renderRunnersView()");
+  assert.equal(list.querySelector('.runner-desktop-probe button'), null);
+  app.evaluate("state.authRequired=false;renderRunnersView()");
+  assert.ok(list.querySelector('#desktopProbe-desktop button'));
+});
+
+test('Desktop probe tracks its targeted task and resumes status checks without dispatching again', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const ticks = [];
+  const timeout = app.window.setTimeout.bind(app.window);
+  app.window.setTimeout = (fn,ms,...args) => ms === 2000 ? ticks.push(fn) : timeout(fn,ms,...args);
+  const advance = async () => {assert.equal(ticks.length,1);ticks.shift()();await settle(1)};
+  app.evaluate(`state.authRequired=true;state.currentUser={id:1,isPlatformAdmin:true};
+    state.runners=[{id:'desk',ownerUserId:1,status:'online',runtimes:[
+      {provider:'pinable-desktop',status:'online',capabilities:['desktop.probe/v1']}]}];renderRunnersView()`);
+  const task = {id:'rt-demo',status:'queued'};
+  app.router.post('/api/runners/tasks', task);
+  app.router.get('/api/runners/tasks/rt-demo/status', () => ({...task,result:'private result',error:'private error'}));
+  const row = () => app.document.getElementById('desktopProbe-desk');
+  row().querySelector('button').click();
+  await settle(2);
+  assert.deepEqual(app.router.calls.find(c => c.method === 'POST' && c.path === '/api/runners/tasks').body,
+    {runnerId:'desk',provider:'pinable-desktop',action:'desktop_probe_v1'});
+  assert.match(row().textContent,/rt-demo · 已排队/);
+  assert.equal(row().querySelector('button').disabled,true);
+  await app.evaluate("runDesktopProbe('desk')");
+  task.status = 'running';
+  await advance();
+  assert.match(row().textContent,/rt-demo · 验证中/);
+  app.evaluate("state.runners[0].status='offline';renderRunnersView()");
+  for(let i=1;i<30;i++)await advance();
+  assert.match(row().textContent,/自动刷新已暂停/);
+  assert.equal(row().querySelector('button').textContent,'刷新验证状态');
+  task.status = 'success';
+  row().querySelector('button').click();
+  await advance();
+  assert.match(row().textContent,/rt-demo · 验证成功/);
+  assert.doesNotMatch(row().textContent,/private/);
+  assert.equal(row().querySelector('button').hidden,true);
+  assert.equal(app.router.calls.filter(c => c.method === 'POST' && c.path === '/api/runners/tasks').length,1);
+  assert.equal(ticks.length,0);
+});

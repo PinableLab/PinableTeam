@@ -2609,6 +2609,7 @@ html[data-theme="dark"] #runnersView{--rv-term:#0a0a0b;--rv-codex:#3f3f46}
 #runnersView .runner-auth-help:is(:hover,:focus-visible){color:var(--rv-text)}
 #runnersView .runner-auth-help .harness-icon{width:13px;height:13px;color:var(--rv-muted-2)}
 #runnersView .runner-runtime-row{min-height:51px;border-bottom:1px solid var(--rv-line-soft);color:var(--rv-text)}
+#runnersView .runner-runtime-row.runner-desktop-probe{grid-template-columns:minmax(0,1fr) auto}
 #runnersView .runner-runtime-label{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}
 #runnersView .runner-runtime-label input{flex:none;margin:0;cursor:pointer}
 #runnersView .runner-runtime-icon{flex:none;display:grid;place-items:center;width:26px;height:26px;border-radius:7px;background:var(--rv-fill);transition:opacity .16s}

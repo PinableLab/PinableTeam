@@ -1237,7 +1237,7 @@ func TestRunnerAdditionalInternalBranches(t *testing.T) {
 	if owner, ok := h.resolveRunnerRegistrant(req); !ok || owner != 0 {
 		t.Fatal("bootstrap registration rejected")
 	}
-	if _, _, err := newRunnerSessionToken(); err != nil {
+	if _, _, err := newRunnerSessionToken(runnerSessionTokenPrefix); err != nil {
 		t.Fatal(err)
 	}
 	bearer := httptest.NewRequest(http.MethodPost, "/runners/register", nil)

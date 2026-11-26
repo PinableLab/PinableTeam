@@ -789,6 +789,7 @@ func TestRunnerTaskManagementRequiresAdminAndOwnership(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/api/runners/tasks"},
 		{http.MethodPost, "/api/runners/tasks"},
+		{http.MethodGet, "/api/runners/tasks/rt-x/status"},
 		{http.MethodPost, "/api/runners/tasks/rt-x/cancel"},
 	} {
 		rec := requestWithHeaders(t, h, tc.method, tc.path, map[string]any{"provider": "mock", "prompt": "rm -rf ~"}, alice)
