@@ -16,9 +16,10 @@ import (
 // durable: a runner disconnect only affects delivery, never the task itself.
 
 var (
-	ErrRunnerTaskNotClaimable = errors.New("runner task is not claimable")
-	ErrRunnerTaskLeaseLost    = errors.New("runner task lease ownership changed")
-	ErrRunnerNotFound         = errors.New("runner not found")
+	ErrRunnerTaskNotClaimable  = errors.New("runner task is not claimable")
+	ErrRunnerTaskLeaseLost     = errors.New("runner task lease ownership changed")
+	ErrRunnerNotFound          = errors.New("runner not found")
+	ErrDesktopProbeUnavailable = errors.New("runner does not currently offer desktop probe")
 )
 
 type runnerTaskPayload struct {
@@ -289,6 +290,9 @@ func (r *RunnersRepo) RunnerSessionByHash(hash string) (domain.Runner, bool) {
 	if err := r.DB.Where("session_token_hash = ?", hash).Take(&row).Error; err != nil {
 		return domain.Runner{}, false
 	}
+	if strings.HasPrefix(row.ID, domain.RunnerDesktopProbeIDPrefix) && row.SessionExpiresAt == nil {
+		return domain.Runner{}, false
+	}
 	if row.SessionExpiresAt != nil && !row.SessionExpiresAt.After(time.Now().UTC()) {
 		return domain.Runner{}, false
 	}
@@ -337,7 +341,13 @@ func (r *RunnersRepo) RunnerHeartbeat(id string, runtimes []domain.RunnerRuntime
 	if version = strings.TrimSpace(version); version != "" {
 		updates["runner_version"] = version
 	}
-	res := r.DB.Model(&runnerRow{}).Where("id = ?", id).Updates(updates)
+	query := r.DB.Model(&runnerRow{}).Where("id = ?", id)
+	if strings.HasPrefix(id, domain.RunnerDesktopProbeIDPrefix) {
+		// A heartbeat already in flight at revocation or expiry cannot
+		// re-create a device or extend a credential that is no longer valid.
+		query = query.Where("session_token_hash <> '' AND session_expires_at > ?", now)
+	}
+	res := query.Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -471,6 +481,22 @@ func (r *RunnersRepo) PutRunnerTask(v domain.RunnerTask) error {
 		return errors.New("invalid desktop probe payload")
 	}
 	v.UpdatedAt = now
+	if v.IsDesktopProbe() {
+		return r.DB.Transaction(func(tx *gorm.DB) error {
+			var row runnerRow
+			err := r.locking(tx).Select("id", "status", "runtimes").Where("id = ?", v.RunnerID).Take(&row).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrRunnerNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if !runnerFromRow(row).SupportsDesktopProbe() {
+				return ErrDesktopProbeUnavailable
+			}
+			return upsert(tx, "runner_tasks", runnerTaskRowValues(v))
+		})
+	}
 	return upsert(r.DB, "runner_tasks", runnerTaskRowValues(v))
 }
 
@@ -869,16 +895,30 @@ func (r *RunnersRepo) RunnerTaskEventsAfter(taskID string, after int64) []domain
 
 // DeregisterRunner removes a runner and everything that points at it: the
 // machine record, default-execution-machine selections that target it, and
-// its queued tasks (running tasks recover through lease expiry). Called when
-// the daemon uninstalls or stops gracefully.
+// its queued tasks. Revoking a paired desktop also cancels its live probes.
+// Ordinary daemon shutdown uses disconnect, which preserves the registration.
 func (r *RunnersRepo) DeregisterRunner(id string, now time.Time) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return fmt.Errorf("runner id is required")
 	}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
+		// Lock in the same order as probe enqueue and claim so no new probe
+		// can cross this device's revocation boundary.
+		var machine runnerRow
+		err := r.locking(tx).Select("id").Where("id = ?", id).Take(&machine).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrRunnerNotFound
+		}
+		if err != nil {
+			return err
+		}
+		states := []string{domain.RunnerTaskQueued}
+		if strings.HasPrefix(id, domain.RunnerDesktopProbeIDPrefix) {
+			states = append(states, domain.RunnerTaskLeased, domain.RunnerTaskRunning)
+		}
 		var rows []runnerTaskRow
-		if err := tx.Where("runner_id = ? AND status = ?", id, domain.RunnerTaskQueued).Find(&rows).Error; err != nil {
+		if err := r.locking(tx).Where("runner_id = ? AND status IN ?", id, states).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, row := range rows {

@@ -277,8 +277,8 @@ func (h *runnersHandlers) runnerDefault(c *gin.Context) {
 	})
 }
 
-// runnerRemove unbinds one of the caller's own offline machines, for a machine
-// that is gone for good and can no longer deregister itself.
+// Owners may revoke a paired desktop device at any time. Uninstalling an
+// ordinary CLI runner still requires it to be offline.
 // 路由: g.DELETE("/api/runners/:id", h.runnerRemove)
 func (h *runnersHandlers) runnerRemove(c *gin.Context) {
 	user, ok := h.requestUser(c.Request, true)
@@ -295,7 +295,7 @@ func (h *runnersHandlers) runnerRemove(c *gin.Context) {
 		c.JSON(http.StatusForbidden, map[string]string{"error": "只能移除自己绑定的执行机器"})
 		return
 	}
-	if runner.Status == domain.RunnerStatusOnline {
+	if runner.Status == domain.RunnerStatusOnline && !strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) {
 		c.JSON(http.StatusConflict, map[string]string{"error": "机器在线，请先在该机器上执行卸载命令，或停止后再移除"})
 		return
 	}
@@ -585,6 +585,9 @@ func (h *runnersHandlers) runnerDeregister(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && !validDesktopDeregisterRequest(c) {
+		return
+	}
 	if err := h.repo.DeregisterRunner(runner.ID, time.Now().UTC()); err != nil {
 		if err == repo.ErrRunnerNotFound {
 			c.JSON(http.StatusOK, map[string]bool{"ok": true})
@@ -745,6 +748,10 @@ func (h *runnersHandlers) runnerHeartbeat(c *gin.Context) {
 	now := time.Now().UTC()
 	expires := now.Add(runnerSessionTTL)
 	if err := h.repo.RunnerHeartbeat(runner.ID, input.Runtimes, strings.TrimSpace(input.Version), now, expires); err != nil {
+		if err == repo.ErrRunnerNotFound && strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) {
+			c.JSON(http.StatusUnauthorized, map[string]string{"error": "设备绑定已失效，请重新配对"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -776,19 +783,16 @@ func (h *runnersHandlers) runnerTasksCollection(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if task.IsDesktopProbe() {
-			runner, ok := h.repo.Runner(task.RunnerID)
-			if !ok {
+		task.ID = "rt-" + randomID()
+		if err := h.repo.PutRunnerTask(task); err != nil {
+			if err == repo.ErrRunnerNotFound {
 				c.JSON(http.StatusNotFound, map[string]string{"error": "找不到指定执行机器"})
 				return
 			}
-			if !runner.SupportsDesktopProbe() {
+			if err == repo.ErrDesktopProbeUnavailable {
 				c.JSON(http.StatusConflict, map[string]string{"error": "执行机器未在线提供 desktop.probe/v1 能力"})
 				return
 			}
-		}
-		task.ID = "rt-" + randomID()
-		if err := h.repo.PutRunnerTask(task); err != nil {
 			c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}

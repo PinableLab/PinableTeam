@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -149,4 +150,128 @@ func TestCrossRepositoryDesktopProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	desktopProbeRequest(t, h, "POST", tasks, create, admin, 409, nil)
+	for _, revokedBy := range []string{"device", "owner"} {
+		t.Run("restart_and_revoke_by_"+revokedBy, func(t *testing.T) {
+			checkDesktopIdentityLifecycle(t, h, admin, revokedBy)
+		})
+	}
+}
+
+// The credential service is the only part of the identity lifecycle represented
+// by a fixture. Each new client and identity must recover from this store alone.
+type desktopProbeSecrets map[string]string
+
+func (desktopProbeSecrets) Enabled() bool { return true }
+
+func (s desktopProbeSecrets) Get(name string) (string, error) {
+	if value, ok := s[name]; ok {
+		return value, nil
+	}
+	return "", workbridge.ErrSecretNotFound
+}
+
+func (s desktopProbeSecrets) Set(name, value string) error {
+	s[name] = value
+	return nil
+}
+
+func (s desktopProbeSecrets) Delete(name string) error {
+	delete(s, name)
+	return nil
+}
+
+func checkDesktopIdentityLifecycle(t *testing.T, h http.Handler, admin map[string]string, revokedBy string) {
+	t.Helper()
+	secrets := desktopProbeSecrets{}
+	registerCalls := 0
+	open := func() (*workbridge.Client, *workbridge.Identity) {
+		t.Helper()
+		tr := &desktopProbeTransport{server: h, before: func(path string) {
+			if path == "/api/runners/register" {
+				registerCalls++
+			}
+		}}
+		client, err := workbridge.NewClient("https://in-process.invalid", tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := workbridge.NewIdentity(client, secrets, func() {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client, identity
+	}
+	checkDevice := func(id, name, wantStatus string) {
+		t.Helper()
+		var mine []domain.Runner
+		desktopProbeRequest(t, h, "GET", "/api/runners?mine=1", nil, admin, 200, &mine)
+		found := false
+		for _, r := range mine {
+			if r.Name != name && r.ID != id {
+				continue
+			}
+			if found || wantStatus == "" || r.ID != id || r.Name != name || r.Status != wantStatus {
+				t.Fatalf("unexpected device id %q, name %q, status %q", r.ID, r.Name, r.Status)
+			}
+			found = true
+		}
+		if !found && wantStatus != "" {
+			t.Fatalf("missing %s device %q", wantStatus, id)
+		}
+	}
+
+	name := "restart-" + revokedBy
+	firstClient, first := open()
+	var bind struct{ Code string }
+	desktopProbeRequest(t, h, "POST", "/api/runners/bind-codes", map[string]any{}, admin, 200, &bind)
+	paired, err := first.Pair(t.Context(), bind.Code, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkDevice(paired.RunnerID, name, "online")
+	if err := firstClient.Disconnect(t.Context(), paired); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	checkDevice(paired.RunnerID, name, "offline")
+
+	restartedClient, restarted := open()
+	defer restarted.Close()
+	saved, err := restarted.Restore()
+	if err != nil || saved.RunnerID != paired.RunnerID {
+		t.Fatalf("restored id %q, error %v", saved.RunnerID, err)
+	}
+	result, err := restartedClient.RunOnce(t.Context(), saved)
+	if err != nil || result.Status != "idle" {
+		t.Fatalf("restarted Desktop reported %q: %v", result.Status, err)
+	}
+	checkDevice(saved.RunnerID, name, "online")
+
+	if revokedBy == "device" {
+		if err := restarted.Unpair(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := restarted.Restore(); !errors.Is(err, workbridge.ErrSecretNotFound) {
+			t.Fatalf("local credential after unpair: %v", err)
+		}
+	} else {
+		desktopProbeRequest(t, h, "DELETE", "/api/runners/"+saved.RunnerID, nil, admin, 200, nil)
+		restarted.Close()
+		// A stopped Desktop learns about owner-initiated revocation on its next request.
+		var staleIdentity *workbridge.Identity
+		restartedClient, staleIdentity = open()
+		defer staleIdentity.Close()
+		saved, err = staleIdentity.Restore()
+		if err != nil || saved.RunnerID != paired.RunnerID {
+			t.Fatalf("local id after remote removal %q, error %v", saved.RunnerID, err)
+		}
+	}
+	checkDevice(saved.RunnerID, name, "")
+	if _, err := restartedClient.RunOnce(t.Context(), saved); !errors.Is(err, workbridge.ErrSessionRejected) {
+		t.Fatalf("old device heartbeat after revocation: %v", err)
+	}
+	checkDevice(saved.RunnerID, name, "")
+	if registerCalls != 1 {
+		t.Fatalf("pair, restart and revoked retry made %d registrations, want 1", registerCalls)
+	}
 }

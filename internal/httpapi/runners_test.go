@@ -46,6 +46,12 @@ func requestWithHeaders(t *testing.T, h http.Handler, method, path string, body 
 
 func newRunnerTestServer(t *testing.T) http.Handler {
 	t.Helper()
+	h, _ := newRunnerTestServerStore(t)
+	return h
+}
+
+func newRunnerTestServerStore(t *testing.T) (http.Handler, *repo.Store) {
+	t.Helper()
 	root := t.TempDir()
 	s, err := repo.OpenTest()
 	if err != nil {
@@ -56,7 +62,7 @@ func newRunnerTestServer(t *testing.T) http.Handler {
 		t.Fatal(err)
 	}
 	e := engine.New(s, runtime.NewManager(filepath.Join(root, "workspaces")))
-	return New(s, e, tracker.NewService(), "", "")
+	return New(s, e, tracker.NewService(), "", ""), s
 }
 
 func registerTestRunner(t *testing.T, h http.Handler) (runnerID, session string) {

@@ -149,7 +149,7 @@ func TestDesktopProbeRegistrationKeepsDeviceIdentity(t *testing.T) {
 		{http.MethodPost, "/runners/heartbeat", map[string]any{"runtimes": []domain.RunnerRuntime{{Provider: "mock"}}}, http.StatusForbidden},
 		{http.MethodGet, "/api/runners/tasks", nil, http.StatusForbidden},
 		{http.MethodGet, "/api/runners/tasks/" + otherProbe.ID + "/status", nil, http.StatusForbidden},
-		{http.MethodPost, "/runners/deregister", nil, http.StatusForbidden},
+		{http.MethodPost, "/runners/deregister", map[string]string{"runnerId": otherDevice}, http.StatusBadRequest},
 		{http.MethodGet, "/runners/connect", nil, http.StatusForbidden},
 		{http.MethodPut, "/runners/previews/sample/content", nil, http.StatusForbidden},
 		{http.MethodPost, "/runners/knowledge/mcp", nil, http.StatusForbidden},

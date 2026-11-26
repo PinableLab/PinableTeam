@@ -6,6 +6,7 @@ const runnerRuntimeTests=new Set();
 const runnerAuthChanges=new Map();
 const runnerMaintenancePending=new Set();
 const runnerDesktopProbes=new Map();
+let desktopPairingCode=null;
 const desktopProbeStatusLabels={queued:'已排队',leased:'设备已领取',running:'验证中',success:'验证成功',failed:'验证失败',canceled:'已取消'};
 let runnerRuntimeMenu=null,runnerRuntimeTrigger=null;
 async function refreshRunners(silent){
@@ -160,7 +161,7 @@ async function runDesktopProbe(runnerId){
     }
     for(let attempt=0;attempt<30;attempt++){
       await new Promise(resolve=>setTimeout(resolve,2000));
-      if(!canManageDesktopProbes())break;
+      if(!canManageDesktopProbes()||runnerDesktopProbes.get(runnerId)!==probe)break;
       const task=await api('/api/runners/tasks/'+encodeURIComponent(probe.id)+'/status',{silent:true}).catch(()=>null);
       if(task?.id!==probe.id||!Object.hasOwn(desktopProbeStatusLabels,task.status))continue;
       if(probe.status!==task.status){
@@ -195,12 +196,56 @@ function runnerCopyCommand(btn,text,message){
   if(!navigator.clipboard){toast('复制失败，请手动选择复制');return}
   navigator.clipboard.writeText(text).then(done).catch(()=>toast('复制失败，请手动选择复制'));
 }
+function renderDesktopPairing(){
+  const section=$('#desktopPairing');
+  if(!section)return;
+  const user=state.currentUser;
+  section.hidden=!user||user.isGuest;
+  const codeLabel=$('#desktopPairCode');
+  if(section.hidden){
+    desktopPairingCode=null;
+    codeLabel.textContent='尚未生成';
+    return;
+  }
+  if(!desktopPairingCode||desktopPairingCode.owner!==user.id)desktopPairingCode={owner:user.id};
+  const binding=desktopPairingCode;
+  const supported=location.protocol==='https:'||(location.protocol==='http:'&&/^(127\.\d+\.\d+\.\d+|\[::1\])$/.test(location.hostname));
+  const address=$('#desktopPairOrigin'),copyAddress=$('#copyDesktopOrigin'),create=$('#newDesktopPairCode'),copyCode=$('#copyDesktopPairCode');
+  address.textContent=supported?location.origin:'请通过 HTTPS 打开 Work。本机测试可用 HTTP 回环 IP（如 127.0.0.1）。';
+  copyAddress.hidden=!supported;
+  copyAddress.onclick=()=>runnerCopyCommand(copyAddress,location.origin,'已复制 Work 地址');
+  $('#desktopPairInstructions').hidden=!supported;
+  $('#desktopPairAccessNote').hidden=!supported||canManageDesktopProbes();
+  const valid=!!binding.code&&Date.now()<binding.expires;
+  codeLabel.textContent=valid?binding.code:binding.busy?'正在生成…':binding.error?'生成失败，请重试':binding.code?'已过期，请生成新码':'尚未生成';
+  create.disabled=!supported||!!binding.busy;
+  copyCode.hidden=!valid;
+  copyCode.onclick=()=>{
+    if(Date.now()>=binding.expires){renderDesktopPairing();return}
+    runnerCopyCommand(copyCode,binding.code,'已复制一次性绑定码');
+  };
+  create.onclick=async()=>{
+    if(create.disabled)return;
+    binding.busy=true;
+    binding.error=false;
+    binding.code='';
+    renderDesktopPairing();
+    try{
+      const response=await api('/api/runners/bind-codes',{method:'POST',silent:true,body:'{}'});
+      binding.expires=Date.parse(response?.expiresAt);
+      if(typeof response?.code==='string'&&response.code&&binding.expires>Date.now())binding.code=response.code;
+      else binding.error=true;
+    }catch{binding.error=true}
+    finally{binding.busy=false;renderDesktopPairing()}
+  };
+}
 function renderRunnersView(){
   const list=$('#runnersList');if(!list)return;
   const host=location.host;
   const httpsOrigin=`https://${host}`,httpOrigin=`http://${host}`;
   const bindHTTPS=$('#bindHttpsOrigin'),bindHTTP=$('#bindHttpOrigin'),bindHost=$('#bindServerHost');
   if(bindHTTPS)bindHTTPS.textContent=httpsOrigin;if(bindHTTP)bindHTTP.textContent=httpOrigin;if(bindHost)bindHost.textContent=host;
+  renderDesktopPairing();
   const tokenSpan=$('#bindToken');
   if(tokenSpan)tokenSpan.textContent=state.runnerBindCode?.code||'生成中…';
   const copyBtn=$('#copyBindCommand');
@@ -242,8 +287,12 @@ function renderRunnersView(){
     const shared=!(Number(r.ownerUserId)>0);
     const cliRows=discoveredCLIs.map(rt=>runnerRuntimeHTML(r,rt,shared)).join('');
     const desktopRow=desktopProbeRowHTML(r);
-    const probeOnly=r.runtimes?.length>0&&r.runtimes.every(isDesktopProbeRuntime);
-    const cliSection=cliRows||(!desktopRow?`<div class="runner-runtime-empty">${probeOnly?'Pinable Desktop · 连接验证设备':'未发现支持的 Agent CLI'}</div>`:'');
+    const desktopDevice=r.id.startsWith('runner-desktop-');
+    const probeOnly=desktopDevice||(r.runtimes?.length>0&&r.runtimes.every(isDesktopProbeRuntime));
+    const owner=!shared&&!!state.currentUser&&!state.currentUser.isGuest&&String(r.ownerUserId)===String(state.currentUser.id);
+    const removable=desktopDevice?owner:r.status!=='online';
+    const deviceNote=desktopDevice&&r.status==='offline'?'设备离线 · 若已保存配对，可在本机用 resume 重新上线':'Pinable Desktop · 连接验证设备';
+    const cliSection=cliRows||(!desktopRow?`<div class="runner-runtime-empty">${probeOnly?deviceNote:'未发现支持的 Agent CLI'}</div>`:'');
     const osLabel=runnerOSLabels[r.os]||r.os||'?';
     const defaultBlocker=isDefault?'':runnerDefaultBlocker(r);
     const checking=runnerMaintenancePending.has(r.id);
@@ -253,6 +302,7 @@ function renderRunnersView(){
         <div class="runner-card-title">
           <div class="runner-card-name"><b title="${escapeHTML(r.name||r.id)}">${escapeHTML(r.name||r.id)}</b>${isDefault?'<span class="runner-tag default">默认</span>':''}${shared?'<span class="runner-tag">共享</span>':''}</div>
           <small>${escapeHTML(osLabel)} · ${escapeHTML(r.arch||'?')} · Runner ${escapeHTML(r.runnerVersion||'未知')}</small>
+          ${desktopDevice?`<small class="runner-desktop-id">设备 ID <code>${escapeHTML(r.id)}</code></small>`:''}
         </div>
         <div class="runner-head-actions">${runnerStatusLabel(r.status,r.lastSeenAt)}${shared||probeOnly?'':`<button class="button ghost runner-check-update" type="button" data-runner-check-update="${escapeHTML(r.id)}" ${r.status!=='online'?'disabled':checking?'aria-disabled="true"':''}>${huiIcon(checking?'arc-spinner':'refresh')}${checking?'处理中…':'检查更新'}</button>`}</div>
       </div>
@@ -261,15 +311,15 @@ function renderRunnersView(){
         ${cliSection}
         ${desktopRow}
       </div>
-      <div class="runner-card-action" ${probeOnly&&!isDefault&&r.status==='online'?'hidden':''}>
+      <div class="runner-card-action" ${probeOnly&&!isDefault&&!removable?'hidden':''}>
         ${probeOnly?'':runnerRunLimitHTML(r)}
         <span class="runner-card-spacer"></span>
         ${isDefault?'<button class="button ghost small runner-text-button" type="button" data-set-default="">切回云端</button>':''}
-        ${r.status==='online'?'':`<button class="button ghost small runner-text-button" type="button" data-remove-runner="${escapeHTML(r.id)}" title="机器已不再使用时移除绑定">移除</button>`}
+        ${removable?`<button class="button ghost small runner-text-button" type="button" data-remove-runner="${escapeHTML(r.id)}">${desktopDevice?'解除配对':'移除'}</button>`:''}
         ${isDefault||probeOnly?'':`<button class="button hui-btn-soft small" type="button" ${defaultBlocker?`disabled title="${escapeHTML(defaultBlocker)}"`:''} data-set-default="${escapeHTML(r.id)}">设为默认</button>`}
       </div>
     </article>`;
-  }).join('')||'<div class="runner-empty"><b>还没有机器</b><span>执行上方命令后自动出现</span></div>';
+  }).join('')||'<div class="runner-empty"><b>还没有机器</b><span>接入执行器或完成 Desktop 配对后，设备将在这里出现。</span></div>';
   // Bind click handlers via JS (CSP blocks inline onclick attributes).
   runners.forEach(updateDesktopProbeRow);
   list.querySelectorAll('[data-set-default]').forEach(btn=>btn.onclick=()=>{
@@ -316,10 +366,15 @@ function renderRunnersView(){
 }
 async function removeRunner(runnerId){
   const runner=(state.runners||[]).find(r=>r.id===runnerId);
-  if(!await afConfirm({title:'移除执行机器',message:`确定移除 ${runner?.name||runnerId}？之后如需再用这台机器，重新复制接入命令执行即可。`,confirmText:'移除',isDanger:true}))return;
+  const desktop=runnerId.startsWith('runner-desktop-');
+  const name=runner?.name||runnerId;
+  const question=desktop?{title:'解除 Desktop 配对',message:`解除「${name}」与 Work 的配对？该设备的凭据将失效。若本机保存过配对，请先运行 work-bridge-probe -mode forget -work-url 原地址，再用新绑定码配对。`,confirmText:'解除配对'}:
+    {title:'移除执行机器',message:`确定移除 ${name}？之后如需再用这台机器，重新复制接入命令执行即可。`,confirmText:'移除'};
+  if(!await afConfirm({...question,isDanger:true}))return;
   try{
     await api(`/api/runners/${encodeURIComponent(runnerId)}`,{method:'DELETE'});
-    toast('已移除','ok');refreshRunners(true);
+    runnerDesktopProbes.delete(runnerId);
+    toast(desktop?'已解除 Desktop 配对':'已移除','ok');refreshRunners(true);
   }catch(err){toast(err.message)}
 }
 // Mirrors domain.Runner.DefaultSelectionBlocker so the page and
