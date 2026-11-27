@@ -1,3 +1,7 @@
+# Pinable shared local files
+.codegraph/
+[Dd]esktop.ini
+
 # Local state and credentials
 .env
 .env.*
@@ -26,3 +30,8 @@ test-results/
 # Code-OSS has vendored runtime dependencies embedded by Go.
 !web/vscode-web/**/node_modules/
 !web/vscode-web/**
+
+# Environment config templates (not credentials)
+!.env.sample
+!.env.template
+!.env.dist

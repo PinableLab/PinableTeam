@@ -94,3 +94,7 @@ Preserve the platform architecture; keep deployment-specific adapters isolated. 
   `migrateLegacyProjectTapd`），`Open` 只留连接 + gorm AutoMigrate，
   `migrations/` 清空为手动 SQL 脚本目录，测试默认数据移入
   `internal/repo/opentest.go`。
+
+## Git ignore rules
+
+For local files and generated indexes, follow the [Pinable Git ignore baseline](https://github.com/PinableLab/pinable-rules/blob/main/common/development.md#git-忽略规则). Keep `.codegraph/` and local environment overrides out of Git. Preserve tracked examples and shared configuration.
