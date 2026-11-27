@@ -2565,6 +2565,11 @@ html[data-theme="dark"] #runnersView{--rv-term:#0a0a0b;--rv-codex:#3f3f46}
 #runnersView .runner-command-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px;margin-top:10px}
 #runnersView .runner-command-note{display:flex;align-items:center;gap:4px;margin:0;color:var(--rv-muted);font-size:12px}
 #runnersView .runner-command-note span{color:var(--rv-ok);font-weight:700}
+#runnersView .runner-desktop-pairing{margin-top:14px;border-top:1px solid var(--rv-line-soft);padding-top:12px;color:var(--rv-text);font-size:13px}
+#runnersView .runner-desktop-pairing summary{width:fit-content;cursor:pointer;font-weight:600}
+#runnersView .runner-desktop-pairing p{margin:10px 0;color:var(--rv-muted);line-height:1.6}
+#runnersView .runner-pair-field{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin-top:6px}
+#runnersView :is(.runner-pair-field,.runner-desktop-id) code{overflow-wrap:anywhere;user-select:all}
 #runnersView .runner-uninstall{min-width:0;max-width:100%}
 #runnersView .runner-uninstall[open]{flex-basis:100%}
 #runnersView .runner-uninstall summary{width:max-content;margin-left:auto;list-style:none;color:var(--rv-muted);font-size:12px;cursor:pointer;transition:color .16s}
@@ -2609,6 +2614,7 @@ html[data-theme="dark"] #runnersView{--rv-term:#0a0a0b;--rv-codex:#3f3f46}
 #runnersView .runner-auth-help:is(:hover,:focus-visible){color:var(--rv-text)}
 #runnersView .runner-auth-help .harness-icon{width:13px;height:13px;color:var(--rv-muted-2)}
 #runnersView .runner-runtime-row{min-height:51px;border-bottom:1px solid var(--rv-line-soft);color:var(--rv-text)}
+#runnersView .runner-runtime-row.runner-desktop-probe{grid-template-columns:minmax(0,1fr) auto}
 #runnersView .runner-runtime-label{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}
 #runnersView .runner-runtime-label input{flex:none;margin:0;cursor:pointer}
 #runnersView .runner-runtime-icon{flex:none;display:grid;place-items:center;width:26px;height:26px;border-radius:7px;background:var(--rv-fill);transition:opacity .16s}

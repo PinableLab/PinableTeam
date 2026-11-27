@@ -363,3 +363,33 @@ func TestRunnerSessionLookup(t *testing.T) {
 		t.Fatal("expired session resolved")
 	}
 }
+
+func TestDesktopProbeRequiresPinAndActionForClaim(t *testing.T) {
+	s := newTestRunner(t)
+	runner := domain.Runner{ID: "desktop", Status: domain.RunnerStatusOnline, Runtimes: []domain.RunnerRuntime{
+		{Provider: domain.RunnerProviderDesktop, Status: domain.RuntimeStatusOnline, Capabilities: []string{domain.RunnerCapabilityDesktopProbe}},
+	}}
+	if err := s.PutRunner(runner); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []domain.RunnerTask{
+		{ID: "orphan", Provider: domain.RunnerProviderDesktop, Action: domain.RunnerTaskActionDesktopProbe, Status: domain.RunnerTaskQueued, MaxAttempts: 1},
+		{ID: "unknown-action", Provider: domain.RunnerProviderDesktop, RunnerID: runner.ID, Action: "future_action", Status: domain.RunnerTaskQueued, MaxAttempts: 1},
+		{ID: "old-payload", Provider: domain.RunnerProviderDesktop, RunnerID: runner.ID, Action: domain.RunnerTaskActionDesktopProbe, Status: domain.RunnerTaskQueued, MaxAttempts: 1, Invocation: &domain.RunnerInvocation{}},
+	} {
+		if err := s.PutRunnerTask(task); err == nil {
+			t.Fatalf("accepted invalid desktop task %+v", task)
+		}
+		// Insert a pre-validation row to verify both claim paths still skip it.
+		if err := upsert(s.DB, "runner_tasks", runnerTaskRowValues(task)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	providers := []string{domain.RunnerProviderDesktop}
+	if ok, err := s.RunnerTaskAvailable(runner.ID, providers); err != nil || ok {
+		t.Fatalf("untargeted desktop preflight = %v, %v", ok, err)
+	}
+	if _, ok, err := s.ClaimRunnerTask(runner.ID, providers, time.Now(), time.Minute); err != nil || ok {
+		t.Fatalf("untargeted desktop claim = %v, %v", ok, err)
+	}
+}

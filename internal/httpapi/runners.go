@@ -76,13 +76,14 @@ import (
 //	g.GET("/runners/tasks/:id/control", h.runnerTaskControl)
 
 const (
-	runnerLongPollDefault    = 30 * time.Second
-	runnerDBPollDefault      = time.Second
-	runnerOfflineThreshold   = 90 * time.Second
-	runnerTaskLeaseTTL       = 120 * time.Second
-	runnerSweepInterval      = 15 * time.Second
-	runnerSessionTokenPrefix = "afr_"
-	runnerSessionTTL         = 30 * 24 * time.Hour
+	runnerLongPollDefault          = 30 * time.Second
+	runnerDBPollDefault            = time.Second
+	runnerOfflineThreshold         = 90 * time.Second
+	runnerTaskLeaseTTL             = 120 * time.Second
+	runnerSweepInterval            = 15 * time.Second
+	runnerSessionTokenPrefix       = "afr_"
+	desktopProbeSessionTokenPrefix = "afdp_"
+	runnerSessionTTL               = 30 * 24 * time.Hour
 )
 
 type runnersHandlers struct {
@@ -188,7 +189,7 @@ func constantTimeEqual(a, b string) bool {
 // runnerFromSession resolves the Bearer session token issued at registration.
 func (h *runnersHandlers) runnerFromSession(r *http.Request) (domain.Runner, bool) {
 	raw, ok := bearerToken(r)
-	if !ok || !strings.HasPrefix(raw, runnerSessionTokenPrefix) {
+	if !ok || !(strings.HasPrefix(raw, runnerSessionTokenPrefix) || strings.HasPrefix(raw, desktopProbeSessionTokenPrefix)) {
 		return domain.Runner{}, false
 	}
 	sum := sha256.Sum256([]byte(raw))
@@ -203,15 +204,26 @@ func (h *runnersHandlers) runnerSessionAuth(c *gin.Context) (domain.Runner, bool
 		c.Header("WWW-Authenticate", `Bearer realm="AgentFlow Runner"`)
 		c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid runner session"})
 	}
+	if ok && strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && c.Param("id") != "" {
+		_, exists, err := h.repo.DesktopProbeStatus(c.Param("id"), runner.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return domain.Runner{}, false
+		}
+		if !exists {
+			c.Status(http.StatusNotFound)
+			return domain.Runner{}, false
+		}
+	}
 	return runner, ok
 }
 
-func newRunnerSessionToken() (string, string, error) {
+func newRunnerSessionToken(prefix string) (string, string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", "", err
 	}
-	plain := runnerSessionTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	plain := prefix + base64.RawURLEncoding.EncodeToString(raw)
 	sum := sha256.Sum256([]byte(plain))
 	return plain, hex.EncodeToString(sum[:]), nil
 }
@@ -265,8 +277,8 @@ func (h *runnersHandlers) runnerDefault(c *gin.Context) {
 	})
 }
 
-// runnerRemove unbinds one of the caller's own offline machines, for a machine
-// that is gone for good and can no longer deregister itself.
+// Owners may revoke a paired desktop device at any time. Uninstalling an
+// ordinary CLI runner still requires it to be offline.
 // 路由: g.DELETE("/api/runners/:id", h.runnerRemove)
 func (h *runnersHandlers) runnerRemove(c *gin.Context) {
 	user, ok := h.requestUser(c.Request, true)
@@ -283,7 +295,7 @@ func (h *runnersHandlers) runnerRemove(c *gin.Context) {
 		c.JSON(http.StatusForbidden, map[string]string{"error": "只能移除自己绑定的执行机器"})
 		return
 	}
-	if runner.Status == domain.RunnerStatusOnline {
+	if runner.Status == domain.RunnerStatusOnline && !strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) {
 		c.JSON(http.StatusConflict, map[string]string{"error": "机器在线，请先在该机器上执行卸载命令，或停止后再移除"})
 		return
 	}
@@ -573,6 +585,9 @@ func (h *runnersHandlers) runnerDeregister(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && !validDesktopDeregisterRequest(c) {
+		return
+	}
 	if err := h.repo.DeregisterRunner(runner.ID, time.Now().UTC()); err != nil {
 		if err == repo.ErrRunnerNotFound {
 			c.JSON(http.StatusOK, map[string]bool{"ok": true})
@@ -631,8 +646,8 @@ func (h *runnersHandlers) runnerRegister(c *gin.Context) {
 	if input.MaxConcurrency > 32 {
 		input.MaxConcurrency = 32
 	}
-	// A re-registration with a known runner id rotates the session token and
-	// re-binds ownership to the token used for this registration.
+	// Ordinary CLI daemons can rotate a registration. A desktop probe pairs a
+	// fresh device identity, which cannot be replaced using only its public ID.
 	now := time.Now().UTC()
 	runner := domain.Runner{
 		Name:           strings.TrimSpace(input.Name),
@@ -646,14 +661,23 @@ func (h *runnersHandlers) runnerRegister(c *gin.Context) {
 		OwnerUserID:    owner,
 		LastSeenAt:     &now,
 	}
+	probeOnly := domain.OnlyDesktopRuntimes(runner.Runtimes)
+	tokenPrefix := runnerSessionTokenPrefix
 	if existing, ok := h.repo.Runner(strings.TrimSpace(input.RunnerID)); ok {
+		if strings.HasPrefix(existing.ID, domain.RunnerDesktopProbeIDPrefix) || domain.OnlyDesktopRuntimes(existing.Runtimes) || probeOnly {
+			c.JSON(http.StatusConflict, map[string]string{"error": "桌面探测需要绑定新的设备身份"})
+			return
+		}
 		runner.ID = existing.ID
 		runner.CreatedAt = existing.CreatedAt
 		runner.Runtimes = normalizeRunnerRuntimes(input.Runtimes, existing.Runtimes)
+	} else if probeOnly {
+		runner.ID = domain.RunnerDesktopProbeIDPrefix + randomID()
+		tokenPrefix = desktopProbeSessionTokenPrefix
 	} else {
 		runner.ID = "runner-" + randomID()
 	}
-	plain, hash, err := newRunnerSessionToken()
+	plain, hash, err := newRunnerSessionToken(tokenPrefix)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": "生成 session token 失败"})
 		return
@@ -717,9 +741,17 @@ func (h *runnersHandlers) runnerHeartbeat(c *gin.Context) {
 	if !decode(c, &input) {
 		return
 	}
+	if strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && len(input.Runtimes) != 0 && !domain.OnlyDesktopRuntimes(input.Runtimes) {
+		c.JSON(http.StatusForbidden, map[string]string{"error": "桌面探测会话只能上报桌面运行时"})
+		return
+	}
 	now := time.Now().UTC()
 	expires := now.Add(runnerSessionTTL)
 	if err := h.repo.RunnerHeartbeat(runner.ID, input.Runtimes, strings.TrimSpace(input.Version), now, expires); err != nil {
+		if err == repo.ErrRunnerNotFound && strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) {
+			c.JSON(http.StatusUnauthorized, map[string]string{"error": "设备绑定已失效，请重新配对"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -746,43 +778,21 @@ func (h *runnersHandlers) runnerTasksCollection(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, tasks)
 	case http.MethodPost:
-		var input struct {
-			Provider    string   `json:"provider"`
-			Prompt      string   `json:"prompt"`
-			Workspace   string   `json:"workspace"`
-			RunnerID    string   `json:"runnerId"`
-			Args        []string `json:"args"`
-			MaxAttempts int      `json:"maxAttempts"`
-		}
-		if !decode(c, &input) {
+		task, err := domain.DecodeManualRunnerTask(http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		input.Provider = strings.TrimSpace(input.Provider)
-		if input.Provider == "" {
-			c.JSON(http.StatusBadRequest, map[string]string{"error": "provider 不能为空"})
-			return
-		}
-		if strings.TrimSpace(input.Prompt) == "" {
-			c.JSON(http.StatusBadRequest, map[string]string{"error": "prompt 不能为空"})
-			return
-		}
-		if input.MaxAttempts < 1 {
-			input.MaxAttempts = 1
-		}
-		if input.MaxAttempts > 5 {
-			input.MaxAttempts = 5
-		}
-		task := domain.RunnerTask{
-			ID:          "rt-" + randomID(),
-			RunnerID:    strings.TrimSpace(input.RunnerID),
-			Provider:    input.Provider,
-			Prompt:      input.Prompt,
-			Workspace:   strings.TrimSpace(input.Workspace),
-			Args:        input.Args,
-			Status:      domain.RunnerTaskQueued,
-			MaxAttempts: input.MaxAttempts,
-		}
+		task.ID = "rt-" + randomID()
 		if err := h.repo.PutRunnerTask(task); err != nil {
+			if err == repo.ErrRunnerNotFound {
+				c.JSON(http.StatusNotFound, map[string]string{"error": "找不到指定执行机器"})
+				return
+			}
+			if err == repo.ErrDesktopProbeUnavailable {
+				c.JSON(http.StatusConflict, map[string]string{"error": "执行机器未在线提供 desktop.probe/v1 能力"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -839,6 +849,10 @@ func (h *runnersHandlers) runnerTaskClaim(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, map[string]string{"error": "availableRuntimes 不能为空"})
 		return
 	}
+	if strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && (len(input.AvailableRuntimes) != 1 || input.AvailableRuntimes[0] != domain.RunnerProviderDesktop) {
+		c.JSON(http.StatusForbidden, map[string]string{"error": "桌面探测会话只能领取桌面探测任务"})
+		return
+	}
 	if input.Capacity <= 0 {
 		input.Capacity = 1
 	}
@@ -852,6 +866,10 @@ func (h *runnersHandlers) runnerTaskClaim(c *gin.Context) {
 	respond := func(task domain.RunnerTask) {
 		if input.Preflight {
 			c.JSON(http.StatusOK, map[string]bool{"taskAvailable": true})
+			return
+		}
+		if task.IsDesktopProbe() {
+			c.JSON(http.StatusOK, map[string]any{"task": task.DesktopProbeReceipt()})
 			return
 		}
 		if task.Invocation != nil && task.Invocation.GitSSHUserID > 0 && runner.SupportsGitSSH() && len(task.Invocation.GitSSHRemotes()) > 0 {
@@ -946,7 +964,33 @@ func (h *runnersHandlers) runnerTaskGet(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(task.Provider), domain.RunnerProviderDesktop) {
+		if !task.IsDesktopProbe() || runner.ID != task.RunnerID {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.JSON(http.StatusOK, task.DesktopProbeReceipt())
+		return
+	}
 	c.JSON(http.StatusOK, domain.PublicRunnerTask(resolveRunnerTaskSandbox(task, runner.OS)))
+}
+
+// runnerDesktopProbeStatus serves the management UI without returning execution payloads.
+func (h *runnersHandlers) runnerDesktopProbeStatus(c *gin.Context) {
+	if !h.requireRunnerTaskAdmin(c) {
+		return
+	}
+	id := c.Param("id")
+	status, exists, err := h.repo.DesktopProbeStatus(id, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.JSON(http.StatusOK, map[string]string{"id": id, "status": status})
 }
 
 // resolveRunnerTaskSandbox hands the runner a concrete sandbox driver: the
@@ -1140,6 +1184,10 @@ func (h *runnersHandlers) runnerTaskComplete(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, map[string]string{"error": "单次最多上报 64 个产物文件"})
 		return
 	}
+	if strings.HasPrefix(runner.ID, domain.RunnerDesktopProbeIDPrefix) && (input.Artifacts != nil || input.Outputs != nil) {
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "桌面探测会话只提交探测结果"})
+		return
+	}
 	for name, content := range input.Artifacts {
 		if len(content) > 1<<20 {
 			c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("产物 %s 超过 1MB 上传限制", name)})
@@ -1161,6 +1209,10 @@ func (h *runnersHandlers) runnerTaskComplete(c *gin.Context) {
 	h.engine.NotifyRunnerTaskChanged(c.Param("id"))
 	if task, ok := h.repo.RunnerTask(c.Param("id")); ok {
 		h.engine.OnRunnerTaskCompleted(task)
+		if task.IsDesktopProbe() {
+			c.JSON(http.StatusOK, map[string]any{"ok": true, "status": task.Status})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, map[string]bool{"ok": true})
 }

@@ -210,6 +210,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	// master(net/http) 对带尾斜杠的 /api 子树路径按各自 handler 语义返回
 	// 405/404；gin 默认会 301 重定向到无斜杠路径，行为不同，关闭之。
 	g.RedirectTrailingSlash = false
+	g.Use(limitDesktopProbeSession)
 	g.Use(api.previews.previewHost())
 	g.Use(api.browser.devServerHost())
 	// gin 只有在显式注册 NoMethod 后才会对"路径匹配但方法不符"返回 405，
@@ -626,6 +627,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.POST("/api/runners/tasks", api.runners.runnerTasksCollection)
 	g.POST("/api/runners/tasks/claim", api.runners.runnerTaskClaim)
 	g.GET("/api/runners/tasks/:id", api.runners.runnerTaskGet)
+	g.GET("/api/runners/tasks/:id/status", api.runners.runnerDesktopProbeStatus)
 	g.POST("/api/runners/tasks/:id/cancel", api.runners.runnerTaskCancel)
 	g.POST("/api/runners/tasks/:id/start", api.runners.runnerTaskStart)
 	g.POST("/api/runners/tasks/:id/lease/renew", api.runners.runnerTaskLeaseRenew)

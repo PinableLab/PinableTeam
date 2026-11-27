@@ -737,7 +737,7 @@
       </div>
 
       <div class="runner-onboarding panel">
-        <div class="panel-heading"><h2>接入新机器</h2><span class="runner-platforms">macOS / Linux</span></div>
+        <div class="panel-heading"><h2>接入新机器</h2><span class="runner-platforms">CLI 安装命令 · macOS / Linux</span></div>
         <ol class="runner-steps">
           <li><span class="runner-step-no">1</span><div><b>安装 CLI</b><small>claude / codex 等</small></div></li>
           <li><span class="runner-step-no">2</span><div><b>执行接入命令</b><small>绑定码 10 分钟有效</small></div></li>
@@ -757,6 +757,17 @@
             </div>
           </details>
         </div>
+        <details class="runner-desktop-pairing" id="desktopPairing">
+          <summary>配对 Pinable Desktop</summary>
+          <p>在装有 <code>work-bridge-probe</code> 且系统凭据库可用的电脑上，将一次性绑定码设为环境变量 <code>PINABLE_WORK_BIND_CODE</code>。每个码可用一次，10 分钟有效。</p>
+          <div class="runner-pair-field"><span>Work 地址</span><code id="desktopPairOrigin"></code><button id="copyDesktopOrigin" type="button" class="button ghost small">复制地址</button></div>
+          <div class="runner-pair-field"><span>绑定码</span><code id="desktopPairCode" role="status">尚未生成</code><button id="newDesktopPairCode" type="button" class="button ghost small">生成新码</button><button id="copyDesktopPairCode" type="button" class="button ghost small" hidden>复制绑定码</button></div>
+          <div id="desktopPairInstructions">
+            <p>将命令中的「地址」替换为上方 Work 地址。首次运行 <code>work-bridge-probe -mode pair -work-url 地址</code>，设备保存配对后离线。</p>
+            <p>每次验证时，在同一电脑运行 <code>work-bridge-probe -mode resume -work-url 地址</code>。待设备上线，用签发绑定码的管理员账号在下方找到相同设备 ID，点击「发起连接验证」。</p>
+          </div>
+          <p id="desktopPairAccessNote" hidden>当前账号可管理自己的配对。要在此页面发起连接验证，请使用平台管理员账号生成绑定码并配对。</p>
+        </details>
       </div>
 
       <div class="runner-list-heading"><h2>我的机器</h2><span class="runner-count" id="runnerCount">0</span><p class="runner-pool-status" id="runnerPoolStatus" aria-live="polite"></p></div>

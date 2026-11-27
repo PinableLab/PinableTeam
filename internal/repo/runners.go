@@ -16,9 +16,10 @@ import (
 // durable: a runner disconnect only affects delivery, never the task itself.
 
 var (
-	ErrRunnerTaskNotClaimable = errors.New("runner task is not claimable")
-	ErrRunnerTaskLeaseLost    = errors.New("runner task lease ownership changed")
-	ErrRunnerNotFound         = errors.New("runner not found")
+	ErrRunnerTaskNotClaimable  = errors.New("runner task is not claimable")
+	ErrRunnerTaskLeaseLost     = errors.New("runner task lease ownership changed")
+	ErrRunnerNotFound          = errors.New("runner not found")
+	ErrDesktopProbeUnavailable = errors.New("runner does not currently offer desktop probe")
 )
 
 type runnerTaskPayload struct {
@@ -289,6 +290,9 @@ func (r *RunnersRepo) RunnerSessionByHash(hash string) (domain.Runner, bool) {
 	if err := r.DB.Where("session_token_hash = ?", hash).Take(&row).Error; err != nil {
 		return domain.Runner{}, false
 	}
+	if strings.HasPrefix(row.ID, domain.RunnerDesktopProbeIDPrefix) && row.SessionExpiresAt == nil {
+		return domain.Runner{}, false
+	}
 	if row.SessionExpiresAt != nil && !row.SessionExpiresAt.After(time.Now().UTC()) {
 		return domain.Runner{}, false
 	}
@@ -337,7 +341,13 @@ func (r *RunnersRepo) RunnerHeartbeat(id string, runtimes []domain.RunnerRuntime
 	if version = strings.TrimSpace(version); version != "" {
 		updates["runner_version"] = version
 	}
-	res := r.DB.Model(&runnerRow{}).Where("id = ?", id).Updates(updates)
+	query := r.DB.Model(&runnerRow{}).Where("id = ?", id)
+	if strings.HasPrefix(id, domain.RunnerDesktopProbeIDPrefix) {
+		// A heartbeat already in flight at revocation or expiry cannot
+		// re-create a device or extend a credential that is no longer valid.
+		query = query.Where("session_token_hash <> '' AND session_expires_at > ?", now)
+	}
+	res := query.Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -467,7 +477,26 @@ func (r *RunnersRepo) PutRunnerTask(v domain.RunnerTask) error {
 	if v.MaxAttempts < 1 {
 		v.MaxAttempts = 1
 	}
+	if strings.EqualFold(strings.TrimSpace(v.Provider), domain.RunnerProviderDesktop) && !v.ValidDesktopProbeForQueue() {
+		return errors.New("invalid desktop probe payload")
+	}
 	v.UpdatedAt = now
+	if v.IsDesktopProbe() {
+		return r.DB.Transaction(func(tx *gorm.DB) error {
+			var row runnerRow
+			err := r.locking(tx).Select("id", "status", "runtimes").Where("id = ?", v.RunnerID).Take(&row).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrRunnerNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if !runnerFromRow(row).SupportsDesktopProbe() {
+				return ErrDesktopProbeUnavailable
+			}
+			return upsert(tx, "runner_tasks", runnerTaskRowValues(v))
+		})
+	}
 	return upsert(r.DB, "runner_tasks", runnerTaskRowValues(v))
 }
 
@@ -477,6 +506,21 @@ func (r *RunnersRepo) RunnerTask(id string) (domain.RunnerTask, bool) {
 		return domain.RunnerTask{}, false
 	}
 	return runnerTaskFromRow(row), true
+}
+
+// DesktopProbeStatus projects only the fields the machine management page polls.
+func (r *RunnersRepo) DesktopProbeStatus(id, runnerID string) (string, bool, error) {
+	var row runnerTaskRow
+	query := r.DB.Select("status").Where("id = ? AND provider = ? AND runner_id <> ''", id, domain.RunnerProviderDesktop).
+		Where(r.sqlPayloadJSONText("action")+" = ?", domain.RunnerTaskActionDesktopProbe)
+	if runnerID != "" {
+		query = query.Where("runner_id = ?", runnerID)
+	}
+	err := query.Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, nil
+	}
+	return row.Status, err == nil, err
 }
 
 // RunnerTaskControl reads only the lease and state polled by active runners.
@@ -501,22 +545,63 @@ func (r *RunnersRepo) RunnerTasks() []domain.RunnerTask {
 	return out
 }
 
+// An eligible queued probe has exactly the action and an optional empty prompt
+// in its JSON payload. Historical rows can predate validation in PutRunnerTask.
+func (r *RunnersRepo) queuedDesktopProbeSQL() string {
+	emptyPayload := "json_remove(payload, '$.action', '$.prompt') = '{}'"
+	if r.isMySQL() {
+		emptyPayload = "JSON_LENGTH(JSON_REMOVE(payload, '$.action', '$.prompt')) = 0"
+	}
+	return "max_attempts = 1 AND " + r.sqlPayloadJSONText("action") + " = ? AND COALESCE(" + r.sqlPayloadJSONText("prompt") + ", '') = '' AND " + emptyPayload
+}
+
+// queuedTasksForRunner is shared by preflight and the transactional claim.
+// Desktop probes always require an explicit target and its current inventory.
+func (r *RunnersRepo) queuedTasksForRunner(db *gorm.DB, runnerID string, providers []string, forClaim bool) (*gorm.DB, error) {
+	allowed := make([]string, 0, len(providers))
+	desktopRequested := false
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if strings.EqualFold(provider, domain.RunnerProviderDesktop) {
+			desktopRequested = true
+		} else if provider != "" {
+			allowed = append(allowed, provider)
+		}
+	}
+	if strings.HasPrefix(runnerID, domain.RunnerDesktopProbeIDPrefix) {
+		allowed = nil
+	}
+	query := db.Where("status = ?", domain.RunnerTaskQueued)
+	if desktopRequested {
+		var row runnerRow
+		inventory := db.Select("id", "status", "runtimes").Where("id = ?", runnerID)
+		if forClaim {
+			inventory = r.locking(inventory)
+		}
+		err := inventory.Take(&row).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		if runnerFromRow(row).SupportsDesktopProbe() {
+			allowed = append(allowed, domain.RunnerProviderDesktop)
+			return query.Where("provider IN ? AND (runner_id = '' OR runner_id = ?)", allowed, runnerID).
+				Where("(provider <> ? OR (runner_id = ? AND "+r.queuedDesktopProbeSQL()+"))", domain.RunnerProviderDesktop, runnerID, domain.RunnerTaskActionDesktopProbe), nil
+		}
+	}
+	return query.Where("provider IN ? AND provider <> ? AND (runner_id = '' OR runner_id = ?)", allowed, domain.RunnerProviderDesktop, runnerID), nil
+}
+
 // RunnerTaskAvailable checks for eligible queued work without taking a lease.
 func (r *RunnersRepo) RunnerTaskAvailable(runnerID string, providers []string) (bool, error) {
 	if strings.TrimSpace(runnerID) == "" || len(providers) == 0 {
 		return false, nil
 	}
-	allowed := make([]string, 0, len(providers))
-	for _, provider := range providers {
-		if provider = strings.TrimSpace(provider); provider != "" {
-			allowed = append(allowed, provider)
-		}
-	}
-	if len(allowed) == 0 {
-		return false, nil
+	query, err := r.queuedTasksForRunner(r.DB, runnerID, providers, false)
+	if err != nil {
+		return false, err
 	}
 	var rows []runnerTaskRow
-	err := r.DB.Select("id").Where("status = ? AND (runner_id = '' OR runner_id = ?) AND provider IN ?", domain.RunnerTaskQueued, runnerID, allowed).Limit(1).Find(&rows).Error
+	err = query.Select("id").Limit(1).Find(&rows).Error
 	return len(rows) > 0, err
 }
 
@@ -531,21 +616,15 @@ func (r *RunnersRepo) ClaimRunnerTask(runnerID string, providers []string, now t
 	if len(providers) == 0 {
 		return domain.RunnerTask{}, false, nil
 	}
-	allowed := make([]string, 0, len(providers))
-	for _, p := range providers {
-		if p = strings.TrimSpace(p); p != "" {
-			allowed = append(allowed, p)
-		}
-	}
-	if len(allowed) == 0 {
-		return domain.RunnerTask{}, false, nil
-	}
 	var claimed domain.RunnerTask
 	var found bool
 	err := r.DB.Transaction(func(tx *gorm.DB) error {
+		query, err := r.queuedTasksForRunner(tx, runnerID, providers, true)
+		if err != nil {
+			return err
+		}
 		var rows []runnerTaskRow
-		if err := r.locking(tx).
-			Where("status = ? AND (runner_id = '' OR runner_id = ?) AND provider IN ?", domain.RunnerTaskQueued, runnerID, allowed).
+		if err := r.locking(query).
 			Order("created_at").Limit(1).
 			Find(&rows).Error; err != nil {
 			return err
@@ -645,6 +724,10 @@ func (r *RunnersRepo) CompleteRunnerTask(id, runnerID, status string, exitCode *
 			return ErrRunnerTaskLeaseLost
 		}
 		task := runnerTaskFromRow(row)
+		if task.IsDesktopProbe() && task.DesiredState == domain.RunnerTaskDesiredCancel {
+			status = domain.RunnerTaskCanceled
+			exitCode, result, errMsg, artifacts, outputs = nil, "", "", nil, nil
+		}
 		task.Status = status
 		task.ExitCode = exitCode
 		task.Result = result
@@ -812,16 +895,30 @@ func (r *RunnersRepo) RunnerTaskEventsAfter(taskID string, after int64) []domain
 
 // DeregisterRunner removes a runner and everything that points at it: the
 // machine record, default-execution-machine selections that target it, and
-// its queued tasks (running tasks recover through lease expiry). Called when
-// the daemon uninstalls or stops gracefully.
+// its queued tasks. Revoking a paired desktop also cancels its live probes.
+// Ordinary daemon shutdown uses disconnect, which preserves the registration.
 func (r *RunnersRepo) DeregisterRunner(id string, now time.Time) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return fmt.Errorf("runner id is required")
 	}
 	return r.DB.Transaction(func(tx *gorm.DB) error {
+		// Lock in the same order as probe enqueue and claim so no new probe
+		// can cross this device's revocation boundary.
+		var machine runnerRow
+		err := r.locking(tx).Select("id").Where("id = ?", id).Take(&machine).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrRunnerNotFound
+		}
+		if err != nil {
+			return err
+		}
+		states := []string{domain.RunnerTaskQueued}
+		if strings.HasPrefix(id, domain.RunnerDesktopProbeIDPrefix) {
+			states = append(states, domain.RunnerTaskLeased, domain.RunnerTaskRunning)
+		}
 		var rows []runnerTaskRow
-		if err := tx.Where("runner_id = ? AND status = ?", id, domain.RunnerTaskQueued).Find(&rows).Error; err != nil {
+		if err := r.locking(tx).Where("runner_id = ? AND status IN ?", id, states).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, row := range rows {

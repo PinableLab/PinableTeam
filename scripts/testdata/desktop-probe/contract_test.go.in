@@ -1,0 +1,277 @@
+// This test runs via scripts/test-desktop-probe.py with both repositories checked out.
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"agentflow/internal/domain"
+	workbridge "agentflow/scripts/testdata/desktop-probe"
+)
+
+// Route Desktop's actual HTTP requests through the full Work router and test database.
+type desktopProbeTransport struct {
+	server http.Handler
+	before func(string)
+}
+
+func (tr *desktopProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if tr.before != nil {
+		tr.before(req.URL.Path)
+	}
+	rec := httptest.NewRecorder()
+	tr.server.ServeHTTP(rec, req)
+	return rec.Result(), nil
+}
+
+func desktopProbeRequest(t *testing.T, h http.Handler, method, path string, body any, headers map[string]string, want int, dest any) {
+	t.Helper()
+	rec := requestWithHeaders(t, h, method, path, body, headers)
+	if rec.Code != want {
+		t.Fatalf("%s %s returned %d, want %d", method, path, rec.Code, want)
+	}
+	if dest != nil {
+		if err := json.Unmarshal(rec.Body.Bytes(), dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCrossRepositoryDesktopProbe(t *testing.T) {
+	t.Setenv("AGENTFLOW_AUTH_REQUIRED", "true")
+	t.Setenv("AGENTFLOW_LOCAL_LOGIN_USER", "alice")
+	t.Setenv("AGENTFLOW_PLATFORM_ADMINS", "alice")
+	t.Setenv("AGENTFLOW_RUNNER_BOOTSTRAP_TOKEN", "")
+	h := newRunnerTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/local", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://example.com")
+	req.RemoteAddr = "127.0.0.1:50000"
+	login := httptest.NewRecorder()
+	h.ServeHTTP(login, req)
+	admin := map[string]string{}
+	for _, cookie := range login.Result().Cookies() {
+		if cookie.Name == authCookieName {
+			admin["Cookie"] = cookie.Name + "=" + cookie.Value
+		}
+	}
+	if login.Code != http.StatusOK || len(admin) == 0 {
+		t.Fatalf("test administrator login returned %d", login.Code)
+	}
+
+	tr := &desktopProbeTransport{server: h}
+	client, err := workbridge.NewClient("https://in-process.invalid", tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := func(name string) workbridge.Session {
+		t.Helper()
+		var bind struct{ Code string }
+		desktopProbeRequest(t, h, "POST", "/api/runners/bind-codes", map[string]any{}, admin, 200, &bind)
+		session, err := client.Pair(t.Context(), bind.Code, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Pair(t.Context(), bind.Code, "replay-"+name); err == nil {
+			t.Fatal("a used bind code paired a second device")
+		}
+		return session
+	}
+	owner, other := pair("first desktop"), pair("second desktop")
+	const tasks = "/api/runners/tasks"
+	create := map[string]string{"runnerId": owner.RunnerID, "provider": workbridge.Provider, "action": workbridge.Action}
+	ownerAuth := map[string]string{"Authorization": "Bearer " + owner.SessionToken}
+	otherAuth := map[string]string{"Authorization": "Bearer " + other.SessionToken}
+	desktopProbeRequest(t, h, "POST", tasks, create, nil, 401, nil)
+	desktopProbeRequest(t, h, "POST", tasks, create, ownerAuth, 403, nil)
+
+	for _, scenario := range []struct {
+		name, cancelBefore, wantStatus string
+		wantEvents                     int
+	}{
+		{"success", "", "success", 1},
+		{"cancel_on_renewal", "/lease/renew", "canceled", 0},
+		{"cancel_at_completion", "/complete", "canceled", 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var task domain.RunnerTask
+			desktopProbeRequest(t, h, "POST", tasks, create, admin, 201, &task)
+			if task.ID == "" || task.RunnerID != owner.RunnerID || task.Status != "queued" {
+				t.Fatalf("unexpected new task, id %q status %q", task.ID, task.Status)
+			}
+			path := tasks + "/" + task.ID
+			idle, err := client.RunOnce(t.Context(), other)
+			if err != nil || idle.Status != "idle" {
+				t.Fatalf("other device received %q: %v", idle.Status, err)
+			}
+			desktopProbeRequest(t, h, "GET", path, nil, otherAuth, 404, nil)
+			tr.before = func(requestPath string) {
+				if scenario.cancelBefore != "" && requestPath == path+scenario.cancelBefore {
+					desktopProbeRequest(t, h, "POST", path+"/cancel", nil, admin, 200, nil)
+				}
+			}
+			t.Cleanup(func() { tr.before = nil })
+			got, err := client.RunOnce(t.Context(), owner)
+			if err != nil || got.TaskID != task.ID || got.Status != scenario.wantStatus {
+				t.Fatalf("Desktop receipt id %q status %q, error %v", got.TaskID, got.Status, err)
+			}
+
+			var status map[string]string
+			desktopProbeRequest(t, h, "GET", path+"/status", nil, admin, 200, &status)
+			if len(status) != 2 || status["id"] != task.ID || status["status"] != got.Status {
+				t.Fatalf("Work management receipt disagrees with Desktop: %v", status)
+			}
+			var stored domain.RunnerTask
+			desktopProbeRequest(t, h, "GET", path, nil, ownerAuth, 200, &stored)
+			if stored.Status != got.Status || stored.LeaseOwner != "" {
+				t.Fatalf("stored terminal state %q, lease owner %q", stored.Status, stored.LeaseOwner)
+			}
+			const fixedResult = "desktop.probe/v1 ok"
+			if got.Status == "success" && stored.Result != fixedResult {
+				t.Errorf("stored result %q", stored.Result)
+			}
+			var events []domain.RunnerTaskEvent
+			desktopProbeRequest(t, h, "GET", path+"/events", nil, ownerAuth, 200, &events)
+			if len(events) != scenario.wantEvents {
+				t.Fatalf("stored %d events, want %d", len(events), scenario.wantEvents)
+			}
+			if len(events) == 1 && (events[0].Seq != 1 || events[0].Type != "system" || events[0].Data != fixedResult) {
+				t.Fatal("unexpected stored probe event")
+			}
+			t.Logf("Desktop and Work status %s, stored events %d", got.Status, len(events))
+		})
+	}
+
+	if err := client.Disconnect(t.Context(), owner); err != nil {
+		t.Fatal(err)
+	}
+	desktopProbeRequest(t, h, "POST", tasks, create, admin, 409, nil)
+	for _, revokedBy := range []string{"device", "owner"} {
+		t.Run("restart_and_revoke_by_"+revokedBy, func(t *testing.T) {
+			checkDesktopIdentityLifecycle(t, h, admin, revokedBy)
+		})
+	}
+}
+
+// The credential service is the only part of the identity lifecycle represented
+// by a fixture. Each new client and identity must recover from this store alone.
+type desktopProbeSecrets map[string]string
+
+func (desktopProbeSecrets) Enabled() bool { return true }
+
+func (s desktopProbeSecrets) Get(name string) (string, error) {
+	if value, ok := s[name]; ok {
+		return value, nil
+	}
+	return "", workbridge.ErrSecretNotFound
+}
+
+func (s desktopProbeSecrets) Set(name, value string) error {
+	s[name] = value
+	return nil
+}
+
+func (s desktopProbeSecrets) Delete(name string) error {
+	delete(s, name)
+	return nil
+}
+
+func checkDesktopIdentityLifecycle(t *testing.T, h http.Handler, admin map[string]string, revokedBy string) {
+	t.Helper()
+	secrets := desktopProbeSecrets{}
+	registerCalls := 0
+	open := func() (*workbridge.Client, *workbridge.Identity) {
+		t.Helper()
+		tr := &desktopProbeTransport{server: h, before: func(path string) {
+			if path == "/api/runners/register" {
+				registerCalls++
+			}
+		}}
+		client, err := workbridge.NewClient("https://in-process.invalid", tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := workbridge.NewIdentity(client, secrets, func() {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client, identity
+	}
+	checkDevice := func(id, name, wantStatus string) {
+		t.Helper()
+		var mine []domain.Runner
+		desktopProbeRequest(t, h, "GET", "/api/runners?mine=1", nil, admin, 200, &mine)
+		found := false
+		for _, r := range mine {
+			if r.Name != name && r.ID != id {
+				continue
+			}
+			if found || wantStatus == "" || r.ID != id || r.Name != name || r.Status != wantStatus {
+				t.Fatalf("unexpected device id %q, name %q, status %q", r.ID, r.Name, r.Status)
+			}
+			found = true
+		}
+		if !found && wantStatus != "" {
+			t.Fatalf("missing %s device %q", wantStatus, id)
+		}
+	}
+
+	name := "restart-" + revokedBy
+	firstClient, first := open()
+	var bind struct{ Code string }
+	desktopProbeRequest(t, h, "POST", "/api/runners/bind-codes", map[string]any{}, admin, 200, &bind)
+	paired, err := first.Pair(t.Context(), bind.Code, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkDevice(paired.RunnerID, name, "online")
+	if err := firstClient.Disconnect(t.Context(), paired); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	checkDevice(paired.RunnerID, name, "offline")
+
+	restartedClient, restarted := open()
+	defer restarted.Close()
+	saved, err := restarted.Restore()
+	if err != nil || saved.RunnerID != paired.RunnerID {
+		t.Fatalf("restored id %q, error %v", saved.RunnerID, err)
+	}
+	result, err := restartedClient.RunOnce(t.Context(), saved)
+	if err != nil || result.Status != "idle" {
+		t.Fatalf("restarted Desktop reported %q: %v", result.Status, err)
+	}
+	checkDevice(saved.RunnerID, name, "online")
+
+	if revokedBy == "device" {
+		if err := restarted.Unpair(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := restarted.Restore(); !errors.Is(err, workbridge.ErrSecretNotFound) {
+			t.Fatalf("local credential after unpair: %v", err)
+		}
+	} else {
+		desktopProbeRequest(t, h, "DELETE", "/api/runners/"+saved.RunnerID, nil, admin, 200, nil)
+		restarted.Close()
+		// A stopped Desktop learns about owner-initiated revocation on its next request.
+		var staleIdentity *workbridge.Identity
+		restartedClient, staleIdentity = open()
+		defer staleIdentity.Close()
+		saved, err = staleIdentity.Restore()
+		if err != nil || saved.RunnerID != paired.RunnerID {
+			t.Fatalf("local id after remote removal %q, error %v", saved.RunnerID, err)
+		}
+	}
+	checkDevice(saved.RunnerID, name, "")
+	if _, err := restartedClient.RunOnce(t.Context(), saved); !errors.Is(err, workbridge.ErrSessionRejected) {
+		t.Fatalf("old device heartbeat after revocation: %v", err)
+	}
+	checkDevice(saved.RunnerID, name, "")
+	if registerCalls != 1 {
+		t.Fatalf("pair, restart and revoked retry made %d registrations, want 1", registerCalls)
+	}
+}

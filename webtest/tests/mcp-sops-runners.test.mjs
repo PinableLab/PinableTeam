@@ -133,3 +133,135 @@ test('runner cards expose runtime controls and persist limits, defaults, and aut
   await app.evaluate(`window.__removeRunner`);
   assert.ok(app.router.calls.some(c => c.method === 'DELETE' && c.path === '/api/runners/runner-local'));
 });
+
+test('Desktop probe controls require an administrator and an online capable runtime', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const desktop = {provider:'pinable-desktop',status:'online',capabilities:['desktop.probe/v1']};
+  const cli = {provider:'codex',status:'online'};
+  const device = (id, runtimes, status='online') => ({id,ownerUserId:1,runtimes,status});
+  const runners = [
+    device('desktop',[desktop]), device('mixed',[desktop,cli]), device('older',[{...desktop,capabilities:[]}]),
+    device('off',[desktop],'offline'), device('disabled',[{...desktop,status:'disabled'}]),
+    device('cli',[{...cli,capabilities:['desktop.probe/v1']}]),
+  ];
+  app.evaluate(`state.authRequired=true;state.currentUser={id:1,isPlatformAdmin:false};state.runners=${JSON.stringify(runners)};renderRunnersView()`);
+  const list = app.document.querySelector('#runnersList');
+  assert.equal(list.querySelector('.runner-desktop-probe button'), null);
+  await app.evaluate("runDesktopProbe('desktop')");
+  assert.equal(app.router.calls.filter(c => c.path === '/api/runners/tasks').length, 0);
+  app.evaluate("state.currentUser={id:1,isPlatformAdmin:true};renderRunnersView()");
+  assert.deepEqual([...list.querySelectorAll('.runner-desktop-probe')].map(el => el.id), ['desktopProbe-desktop','desktopProbe-mixed']);
+  for (const attr of ['data-runner-check-update','data-runner-run-limit','data-set-default']) {
+    assert.equal(list.querySelector(`[${attr}="desktop"]`), null);
+    assert.ok(list.querySelector(`[${attr}="mixed"]`));
+  }
+  app.evaluate("state.currentUser={isPlatformAdmin:true,isGuest:true};renderRunnersView()");
+  assert.equal(list.querySelector('.runner-desktop-probe button'), null);
+  app.evaluate("state.authRequired=false;renderRunnersView()");
+  assert.ok(list.querySelector('#desktopProbe-desktop button'));
+});
+
+test('Desktop probe tracks its targeted task and resumes status checks without dispatching again', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const ticks = [];
+  const timeout = app.window.setTimeout.bind(app.window);
+  app.window.setTimeout = (fn,ms,...args) => ms === 2000 ? ticks.push(fn) : timeout(fn,ms,...args);
+  const advance = async () => {assert.equal(ticks.length,1);ticks.shift()();await settle(1)};
+  app.evaluate(`state.authRequired=true;state.currentUser={id:1,isPlatformAdmin:true};
+    state.runners=[{id:'desk',ownerUserId:1,status:'online',runtimes:[
+      {provider:'pinable-desktop',status:'online',capabilities:['desktop.probe/v1']}]}];renderRunnersView()`);
+  const task = {id:'rt-demo',status:'queued'};
+  app.router.post('/api/runners/tasks', task);
+  app.router.get('/api/runners/tasks/rt-demo/status', () => ({...task,result:'private result',error:'private error'}));
+  const row = () => app.document.getElementById('desktopProbe-desk');
+  row().querySelector('button').click();
+  await settle(2);
+  assert.deepEqual(app.router.calls.find(c => c.method === 'POST' && c.path === '/api/runners/tasks').body,
+    {runnerId:'desk',provider:'pinable-desktop',action:'desktop_probe_v1'});
+  assert.match(row().textContent,/rt-demo · 已排队/);
+  assert.equal(row().querySelector('button').disabled,true);
+  await app.evaluate("runDesktopProbe('desk')");
+  task.status = 'running';
+  await advance();
+  assert.match(row().textContent,/rt-demo · 验证中/);
+  app.evaluate("state.runners[0].status='offline';renderRunnersView()");
+  for(let i=1;i<30;i++)await advance();
+  assert.match(row().textContent,/自动刷新已暂停/);
+  assert.equal(row().querySelector('button').textContent,'刷新验证状态');
+  task.status = 'success';
+  row().querySelector('button').click();
+  await advance();
+  assert.match(row().textContent,/rt-demo · 验证成功/);
+  assert.doesNotMatch(row().textContent,/private/);
+  assert.equal(row().querySelector('button').hidden,true);
+  assert.equal(app.router.calls.filter(c => c.method === 'POST' && c.path === '/api/runners/tasks').length,1);
+  assert.equal(ticks.length,0);
+});
+
+test('Desktop pairing issues fresh one-use codes and copies only the selected value', async (t) => {
+  const app = await loadApp({origin:'https://work.example.test'});
+  t.after(app.close);
+  const field = id => app.document.getElementById(id);
+  const copied = [];
+  app.window.navigator.clipboard.writeText = async text => { copied.push(text) };
+  let issued = 0;
+  app.router.post('/api/runners/bind-codes', () => ({code:'bind-'+(++issued),expiresAt:'2099-01-01T00:00:00Z'}));
+  app.evaluate(`state.authRequired=true;state.currentUser={id:2};state.runnerBindCode={code:'existing-cli'};
+    renderRunnersView()`);
+  assert.equal(field('desktopPairAccessNote').hidden,false);
+  assert.equal(field('copyDesktopPairCode').hidden,true);
+  field('copyDesktopOrigin').click();
+  field('newDesktopPairCode').click();
+  field('newDesktopPairCode').click();
+  await settle();
+  assert.equal(issued,1);
+  assert.equal(field('desktopPairCode').textContent,'bind-1');
+  field('copyDesktopPairCode').click();
+  assert.deepEqual(copied,['https://work.example.test','bind-1']);
+  field('newDesktopPairCode').click();
+  await settle();
+  assert.equal(field('desktopPairCode').textContent,'bind-2');
+  assert.equal(field('bindToken').textContent,'existing-cli');
+  assert.doesNotMatch(field('desktopPairInstructions').textContent,/bind-2/);
+  app.evaluate('Date.now=()=>Date.parse("2100-01-01T00:00:00Z")');
+  field('copyDesktopPairCode').click();
+  assert.equal(field('copyDesktopPairCode').hidden,true);
+  assert.match(field('desktopPairCode').textContent,/已过期/);
+  assert.equal(copied.length,2);
+  app.evaluate('state.currentUser={id:3,isGuest:true};renderRunnersView()');
+  assert.equal(field('desktopPairing').hidden,true);
+  assert.equal(field('desktopPairCode').textContent,'尚未生成');
+});
+
+test('an owner can unpair an online Desktop independently of its latest runtime advertisement', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  const device = (id,ownerUserId,status) => ({id,name:id,ownerUserId,status,runtimes:[]});
+  const runners = [device('runner-desktop-my',7,'online'),device('runner-desktop-off',7,'offline'),
+    device('runner-desktop-other',8,'online'),device('runner-cli-my',7,'online')];
+  app.router.get('/api/runners',runners.slice(1));
+  app.router.delete('/api/runners/runner-desktop-my',{ok:true});
+  app.evaluate(`state.authRequired=true;state.currentUser={id:7,isPlatformAdmin:false};
+    state.runners=${JSON.stringify(runners)};renderRunnersView()`);
+  const remove = id => app.document.querySelector(`[data-remove-runner="${id}"]`);
+  assert.ok(remove('runner-desktop-off'));
+  assert.equal(remove('runner-desktop-other'),null);
+  assert.equal(remove('runner-cli-my'),null);
+  assert.equal(remove('runner-desktop-my').textContent,'解除配对');
+  assert.equal(app.document.querySelector('[data-runner-check-update="runner-desktop-my"]'),null);
+  remove('runner-desktop-my').click();
+  await settle();
+  assert.match(app.document.getElementById('confirmMessage').textContent,/凭据将失效/);
+  app.document.getElementById('confirmCancelBtn').click();
+  await settle();
+  assert.ok(remove('runner-desktop-my'));
+  assert.equal(app.router.calls.filter(c => c.method === 'DELETE').length,0);
+  remove('runner-desktop-my').click();
+  await settle();
+  app.document.getElementById('confirmOkBtn').click();
+  await settle(8);
+  assert.equal(app.router.calls.filter(c => c.method === 'DELETE' && c.path === '/api/runners/runner-desktop-my').length,1);
+  assert.equal(remove('runner-desktop-my'),null);
+});

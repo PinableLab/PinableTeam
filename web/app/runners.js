@@ -5,6 +5,9 @@ let runnerRefreshTimer=null;
 const runnerRuntimeTests=new Set();
 const runnerAuthChanges=new Map();
 const runnerMaintenancePending=new Set();
+const runnerDesktopProbes=new Map();
+let desktopPairingCode=null;
+const desktopProbeStatusLabels={queued:'已排队',leased:'设备已领取',running:'验证中',success:'验证成功',failed:'验证失败',canceled:'已取消'};
 let runnerRuntimeMenu=null,runnerRuntimeTrigger=null;
 async function refreshRunners(silent){
   try{
@@ -106,6 +109,75 @@ function runnerRuntimeHTML(runner,runtime,shared){
     ${shared?'':`<button class="runner-more" type="button" data-runner-runtime-menu="${safeKey}" aria-label="${label} 更多操作" aria-haspopup="menu" aria-expanded="false" aria-busy="${testing||updating}">${huiIcon(testing||updating?'arc-spinner':'more-horizontal')}</button>`}
   </div>`;
 }
+function canManageDesktopProbes(){
+  return !state.authRequired||isPlatformAdmin();
+}
+function isDesktopProbeRuntime(runtime){
+  return runtime.provider==='pinable-desktop'&&Array.isArray(runtime.capabilities)&&runtime.capabilities.includes('desktop.probe/v1');
+}
+function canStartDesktopProbe(runner){
+  return runner?.status==='online'&&runner.runtimes?.some(runtime=>runtime.status==='online'&&isDesktopProbeRuntime(runtime));
+}
+function desktopProbeRowHTML(runner){
+  if(!canManageDesktopProbes()||(!canStartDesktopProbe(runner)&&!runnerDesktopProbes.has(runner.id)))return '';
+  return `<div class="runner-runtime-row runner-desktop-probe" id="desktopProbe-${escapeHTML(runner.id)}">
+    <div class="runner-runtime-name"><b>Pinable Desktop</b><small role="status"></small></div>
+    <button class="button ghost small" type="button">发起连接验证</button>
+  </div>`;
+}
+function updateDesktopProbeRow(runner){
+  const row=document.getElementById('desktopProbe-'+runner.id);
+  if(!row)return;
+  const probe=runnerDesktopProbes.get(runner.id);
+  const label=row.querySelector('small');
+  const message=probe?.id?`任务 ${probe.id} · ${desktopProbeStatusLabels[probe.status]}${probe.paused?' · 自动刷新已暂停':''}`:
+    probe?.busy?'正在提交验证':probe?'提交失败，请稍后重试':'只读连接验证';
+  label.textContent=message;
+  label.title=message;
+  const button=row.querySelector('button');
+  button.hidden=!canManageDesktopProbes()||(!canStartDesktopProbe(runner)&&!probe?.paused);
+  button.disabled=!!probe?.busy;
+  button.textContent=probe?.paused?'刷新验证状态':'发起连接验证';
+  button.onclick=()=>runDesktopProbe(runner.id);
+}
+async function runDesktopProbe(runnerId){
+  const runner=(state.runners||[]).find(r=>r.id===runnerId);
+  if(!runner||!canManageDesktopProbes())return;
+  const previous=runnerDesktopProbes.get(runnerId);
+  if(previous?.busy||(!previous?.paused&&!canStartDesktopProbe(runner)))return;
+  const probe=previous?.paused?previous:{};
+  runnerDesktopProbes.set(runnerId,probe);
+  probe.busy=true;
+  probe.paused=false;
+  updateDesktopProbeRow(runner);
+  try{
+    if(!probe.id){
+      const task=await api('/api/runners/tasks',{method:'POST',silent:true,
+        body:JSON.stringify({runnerId,provider:'pinable-desktop',action:'desktop_probe_v1'})});
+      if(typeof task?.id!=='string'||!task.id)return;
+      probe.id=task.id;
+      probe.status='queued';
+      updateDesktopProbeRow(runner);
+    }
+    for(let attempt=0;attempt<30;attempt++){
+      await new Promise(resolve=>setTimeout(resolve,2000));
+      if(!canManageDesktopProbes()||runnerDesktopProbes.get(runnerId)!==probe)break;
+      const task=await api('/api/runners/tasks/'+encodeURIComponent(probe.id)+'/status',{silent:true}).catch(()=>null);
+      if(task?.id!==probe.id||!Object.hasOwn(desktopProbeStatusLabels,task.status))continue;
+      if(probe.status!==task.status){
+        probe.status=task.status;
+        updateDesktopProbeRow(runner);
+      }
+      if(['success','failed','canceled'].includes(probe.status))return;
+    }
+    probe.paused=true;
+  }catch{
+    // The card reports submission failure without rendering the server response.
+  }finally{
+    probe.busy=false;
+    updateDesktopProbeRow((state.runners||[]).find(r=>r.id===runnerId)||runner);
+  }
+}
 function runnerLastSeen(value){
   if(!value)return '尚无心跳';
   const seconds=Math.max(0,Math.round((Date.now()-new Date(value).getTime())/1000));
@@ -124,12 +196,56 @@ function runnerCopyCommand(btn,text,message){
   if(!navigator.clipboard){toast('复制失败，请手动选择复制');return}
   navigator.clipboard.writeText(text).then(done).catch(()=>toast('复制失败，请手动选择复制'));
 }
+function renderDesktopPairing(){
+  const section=$('#desktopPairing');
+  if(!section)return;
+  const user=state.currentUser;
+  section.hidden=!user||user.isGuest;
+  const codeLabel=$('#desktopPairCode');
+  if(section.hidden){
+    desktopPairingCode=null;
+    codeLabel.textContent='尚未生成';
+    return;
+  }
+  if(!desktopPairingCode||desktopPairingCode.owner!==user.id)desktopPairingCode={owner:user.id};
+  const binding=desktopPairingCode;
+  const supported=location.protocol==='https:'||(location.protocol==='http:'&&/^(127\.\d+\.\d+\.\d+|\[::1\])$/.test(location.hostname));
+  const address=$('#desktopPairOrigin'),copyAddress=$('#copyDesktopOrigin'),create=$('#newDesktopPairCode'),copyCode=$('#copyDesktopPairCode');
+  address.textContent=supported?location.origin:'请通过 HTTPS 打开 Work。本机测试可用 HTTP 回环 IP（如 127.0.0.1）。';
+  copyAddress.hidden=!supported;
+  copyAddress.onclick=()=>runnerCopyCommand(copyAddress,location.origin,'已复制 Work 地址');
+  $('#desktopPairInstructions').hidden=!supported;
+  $('#desktopPairAccessNote').hidden=!supported||canManageDesktopProbes();
+  const valid=!!binding.code&&Date.now()<binding.expires;
+  codeLabel.textContent=valid?binding.code:binding.busy?'正在生成…':binding.error?'生成失败，请重试':binding.code?'已过期，请生成新码':'尚未生成';
+  create.disabled=!supported||!!binding.busy;
+  copyCode.hidden=!valid;
+  copyCode.onclick=()=>{
+    if(Date.now()>=binding.expires){renderDesktopPairing();return}
+    runnerCopyCommand(copyCode,binding.code,'已复制一次性绑定码');
+  };
+  create.onclick=async()=>{
+    if(create.disabled)return;
+    binding.busy=true;
+    binding.error=false;
+    binding.code='';
+    renderDesktopPairing();
+    try{
+      const response=await api('/api/runners/bind-codes',{method:'POST',silent:true,body:'{}'});
+      binding.expires=Date.parse(response?.expiresAt);
+      if(typeof response?.code==='string'&&response.code&&binding.expires>Date.now())binding.code=response.code;
+      else binding.error=true;
+    }catch{binding.error=true}
+    finally{binding.busy=false;renderDesktopPairing()}
+  };
+}
 function renderRunnersView(){
   const list=$('#runnersList');if(!list)return;
   const host=location.host;
   const httpsOrigin=`https://${host}`,httpOrigin=`http://${host}`;
   const bindHTTPS=$('#bindHttpsOrigin'),bindHTTP=$('#bindHttpOrigin'),bindHost=$('#bindServerHost');
   if(bindHTTPS)bindHTTPS.textContent=httpsOrigin;if(bindHTTP)bindHTTP.textContent=httpOrigin;if(bindHost)bindHost.textContent=host;
+  renderDesktopPairing();
   const tokenSpan=$('#bindToken');
   if(tokenSpan)tokenSpan.textContent=state.runnerBindCode?.code||'生成中…';
   const copyBtn=$('#copyBindCommand');
@@ -170,7 +286,13 @@ function renderRunnersView(){
     const discoveredCLIs=(r.runtimes||[]).filter(rt=>runnerCLILabels[rt.provider]);
     const shared=!(Number(r.ownerUserId)>0);
     const cliRows=discoveredCLIs.map(rt=>runnerRuntimeHTML(r,rt,shared)).join('');
-    const cliSection=cliRows||'<div class="runner-runtime-empty">未发现支持的 Agent CLI</div>';
+    const desktopRow=desktopProbeRowHTML(r);
+    const desktopDevice=r.id.startsWith('runner-desktop-');
+    const probeOnly=desktopDevice||(r.runtimes?.length>0&&r.runtimes.every(isDesktopProbeRuntime));
+    const owner=!shared&&!!state.currentUser&&!state.currentUser.isGuest&&String(r.ownerUserId)===String(state.currentUser.id);
+    const removable=desktopDevice?owner:r.status!=='online';
+    const deviceNote=desktopDevice&&r.status==='offline'?'设备离线 · 若已保存配对，可在本机用 resume 重新上线':'Pinable Desktop · 连接验证设备';
+    const cliSection=cliRows||(!desktopRow?`<div class="runner-runtime-empty">${probeOnly?deviceNote:'未发现支持的 Agent CLI'}</div>`:'');
     const osLabel=runnerOSLabels[r.os]||r.os||'?';
     const defaultBlocker=isDefault?'':runnerDefaultBlocker(r);
     const checking=runnerMaintenancePending.has(r.id);
@@ -180,23 +302,26 @@ function renderRunnersView(){
         <div class="runner-card-title">
           <div class="runner-card-name"><b title="${escapeHTML(r.name||r.id)}">${escapeHTML(r.name||r.id)}</b>${isDefault?'<span class="runner-tag default">默认</span>':''}${shared?'<span class="runner-tag">共享</span>':''}</div>
           <small>${escapeHTML(osLabel)} · ${escapeHTML(r.arch||'?')} · Runner ${escapeHTML(r.runnerVersion||'未知')}</small>
+          ${desktopDevice?`<small class="runner-desktop-id">设备 ID <code>${escapeHTML(r.id)}</code></small>`:''}
         </div>
-        <div class="runner-head-actions">${runnerStatusLabel(r.status,r.lastSeenAt)}${shared?'':`<button class="button ghost runner-check-update" type="button" data-runner-check-update="${escapeHTML(r.id)}" ${r.status!=='online'?'disabled':checking?'aria-disabled="true"':''}>${huiIcon(checking?'arc-spinner':'refresh')}${checking?'处理中…':'检查更新'}</button>`}</div>
+        <div class="runner-head-actions">${runnerStatusLabel(r.status,r.lastSeenAt)}${shared||probeOnly?'':`<button class="button ghost runner-check-update" type="button" data-runner-check-update="${escapeHTML(r.id)}" ${r.status!=='online'?'disabled':checking?'aria-disabled="true"':''}>${huiIcon(checking?'arc-spinner':'refresh')}${checking?'处理中…':'检查更新'}</button>`}</div>
       </div>
       <div class="runner-runtime-list">
         ${cliRows?`<div class="runner-runtime-heading"><span>CLI</span><button class="runner-auth-help" type="button" data-runner-auth-help aria-label="模型认证说明" aria-haspopup="dialog">模型认证 ${huiIcon('info')}</button></div>`:''}
         ${cliSection}
+        ${desktopRow}
       </div>
-      <div class="runner-card-action">
-        ${runnerRunLimitHTML(r)}
+      <div class="runner-card-action" ${probeOnly&&!isDefault&&!removable?'hidden':''}>
+        ${probeOnly?'':runnerRunLimitHTML(r)}
         <span class="runner-card-spacer"></span>
         ${isDefault?'<button class="button ghost small runner-text-button" type="button" data-set-default="">切回云端</button>':''}
-        ${r.status==='online'?'':`<button class="button ghost small runner-text-button" type="button" data-remove-runner="${escapeHTML(r.id)}" title="机器已不再使用时移除绑定">移除</button>`}
-        ${isDefault?'':`<button class="button hui-btn-soft small" type="button" ${defaultBlocker?`disabled title="${escapeHTML(defaultBlocker)}"`:''} data-set-default="${escapeHTML(r.id)}">设为默认</button>`}
+        ${removable?`<button class="button ghost small runner-text-button" type="button" data-remove-runner="${escapeHTML(r.id)}">${desktopDevice?'解除配对':'移除'}</button>`:''}
+        ${isDefault||probeOnly?'':`<button class="button hui-btn-soft small" type="button" ${defaultBlocker?`disabled title="${escapeHTML(defaultBlocker)}"`:''} data-set-default="${escapeHTML(r.id)}">设为默认</button>`}
       </div>
     </article>`;
-  }).join('')||'<div class="runner-empty"><b>还没有机器</b><span>执行上方命令后自动出现</span></div>';
+  }).join('')||'<div class="runner-empty"><b>还没有机器</b><span>接入执行器或完成 Desktop 配对后，设备将在这里出现。</span></div>';
   // Bind click handlers via JS (CSP blocks inline onclick attributes).
+  runners.forEach(updateDesktopProbeRow);
   list.querySelectorAll('[data-set-default]').forEach(btn=>btn.onclick=()=>{
     setDefaultRunner(btn.dataset.setDefault||'');
   });
@@ -241,10 +366,15 @@ function renderRunnersView(){
 }
 async function removeRunner(runnerId){
   const runner=(state.runners||[]).find(r=>r.id===runnerId);
-  if(!await afConfirm({title:'移除执行机器',message:`确定移除 ${runner?.name||runnerId}？之后如需再用这台机器，重新复制接入命令执行即可。`,confirmText:'移除',isDanger:true}))return;
+  const desktop=runnerId.startsWith('runner-desktop-');
+  const name=runner?.name||runnerId;
+  const question=desktop?{title:'解除 Desktop 配对',message:`解除「${name}」与 Work 的配对？该设备的凭据将失效。若本机保存过配对，请先运行 work-bridge-probe -mode forget -work-url 原地址，再用新绑定码配对。`,confirmText:'解除配对'}:
+    {title:'移除执行机器',message:`确定移除 ${name}？之后如需再用这台机器，重新复制接入命令执行即可。`,confirmText:'移除'};
+  if(!await afConfirm({...question,isDanger:true}))return;
   try{
     await api(`/api/runners/${encodeURIComponent(runnerId)}`,{method:'DELETE'});
-    toast('已移除','ok');refreshRunners(true);
+    runnerDesktopProbes.delete(runnerId);
+    toast(desktop?'已解除 Desktop 配对':'已移除','ok');refreshRunners(true);
   }catch(err){toast(err.message)}
 }
 // Mirrors domain.Runner.DefaultSelectionBlocker so the page and
